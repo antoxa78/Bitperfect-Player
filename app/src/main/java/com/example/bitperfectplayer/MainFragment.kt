@@ -30,6 +30,7 @@ class MainFragment : BrowseSupportFragment() {
     private val KEY_RESUME = "resume_playback"
     private val KEY_RECENT = "recent_files"
     private val KEY_MUSIC_FOLDERS = "music_folders"
+    private val KEY_AUTO_SCAN = "auto_scan"
     private var hasAttemptedResume = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -81,7 +82,8 @@ class MainFragment : BrowseSupportFragment() {
 
         // Section: Actions
         val actionsAdapter = ArrayObjectAdapter(cardPresenter)
-        actionsAdapter.add(createActionItem("Add Local Files", "Pick audio files from storage"))
+        actionsAdapter.add(createActionItem("Internal Storage", "Browse all internal files"))
+        actionsAdapter.add(createActionItem("Music Folders", "Manage local and network folders"))
         actionsAdapter.add(createActionItem("Add SMB Source", "Enter network share details"))
         val actionsHeader = HeaderItem(1, "Actions")
         rowsAdapter.add(ListRow(actionsHeader, actionsAdapter))
@@ -97,6 +99,12 @@ class MainFragment : BrowseSupportFragment() {
         loadSavedSmbShares(networkAdapter)
         val networkHeader = HeaderItem(3, "Network Shares (SMB)")
         rowsAdapter.add(ListRow(networkHeader, networkAdapter))
+
+        // Section: Browser
+        val browserAdapter = ArrayObjectAdapter(cardPresenter)
+        browserAdapter.add(createActionItem("Internal Storage", "Browse all local files"))
+        val browserHeader = HeaderItem(8, "File Browser")
+        rowsAdapter.add(ListRow(browserHeader, browserAdapter))
 
         // Section: Local Music Library (Configured Folders)
         val localAdapter = ArrayObjectAdapter(cardPresenter)
@@ -118,11 +126,16 @@ class MainFragment : BrowseSupportFragment() {
         val settingsAdapter = ArrayObjectAdapter(cardPresenter)
         settingsAdapter.add(createActionItem("Screensaver", "Delay: ${getScreensaverLabel()}"))
         settingsAdapter.add(createActionItem("Resume Playback", if (isResumeEnabled()) "Enabled" else "Disabled"))
-        settingsAdapter.add(createActionItem("Recent Files", if (isRecentEnabled()) "Enabled" else "Disabled"))
-        settingsAdapter.add(createActionItem("Music Folders", "Manage local and network folders"))
-        settingsAdapter.add(createActionItem("Scan Library", "Update folders and playlists"))
+        settingsAdapter.add(createActionItem("Recent Files", "Settings and cleanup"))
+        settingsAdapter.add(createActionItem("Scan Library", "Options: ${if (isAutoScanEnabled()) "Auto" else "Manual"}"))
         val settingsHeader = HeaderItem(4, "Settings")
         rowsAdapter.add(ListRow(settingsHeader, settingsAdapter))
+
+        // Section: Exit
+        val exitAdapter = ArrayObjectAdapter(cardPresenter)
+        exitAdapter.add(createActionItem("Exit", "Close application and stop playback"))
+        val exitHeader = HeaderItem(7, "Exit")
+        rowsAdapter.add(ListRow(exitHeader, exitAdapter))
 
         adapter = rowsAdapter
     }
@@ -283,7 +296,9 @@ class MainFragment : BrowseSupportFragment() {
             val jsonArray = JSONArray(foldersJson)
             for (i in 0 until jsonArray.length()) {
                 val obj = jsonArray.getJSONObject(i)
-                adapter.add(createMediaItem(obj.getString("name"), "Local Folder", obj.getString("uri")))
+                val rawName = obj.getString("name")
+                val cleanName = if (rawName.contains(":")) rawName.substringAfterLast(":") else rawName
+                adapter.add(createMediaItem(cleanName, "Local Folder", obj.getString("uri")))
             }
         } catch (e: Exception) {}
     }
@@ -323,34 +338,35 @@ class MainFragment : BrowseSupportFragment() {
             val jsonArray = JSONArray(foldersJson)
             for (i in 0 until jsonArray.length()) {
                 val obj = jsonArray.getJSONObject(i)
-                val uri = obj.getString("uri")
-                if (uri.startsWith("content://")) {
-                    findPlaylistsLocal(uri)
+                val uriStr = obj.getString("uri")
+                if (uriStr.startsWith("content://")) {
+                    findPlaylistsLocal(uriStr)
+                } else if (uriStr.startsWith("file://")) {
+                    val path = Uri.parse(uriStr).path
+                    if (path != null) findPlaylistsFile(path)
                 }
             }
         } catch (e: Exception) {}
+    }
 
-        // Scan SMB Shares for Playlists
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val sharesJson = prefs.getString(KEY_SHARES, "[]")
-        try {
-            val jsonArray = JSONArray(sharesJson)
-            for (i in 0 until jsonArray.length()) {
-                val obj = jsonArray.getJSONObject(i)
-                val ip = obj.getString("ip")
-                val share = obj.getString("share")
-                val user = obj.optString("user", "")
-                val pass = obj.optString("pass", "")
-                val uri = if (user.isNotEmpty()) {
-                    val encUser = Uri.encode(user)
-                    val encPass = Uri.encode(pass)
-                    "smb://$encUser:$encPass@$ip/$share/"
-                } else {
-                    "smb://$ip/$share/"
+    private fun findPlaylistsFile(path: String) {
+        Thread {
+            try {
+                val root = java.io.File(path)
+                fun scanRecursive(file: java.io.File) {
+                    if (file.isDirectory) {
+                        file.listFiles()?.forEach { scanRecursive(it) }
+                    } else if (file.name.lowercase().endsWith(".m3u") || file.name.lowercase().endsWith(".m3u8")) {
+                        activity?.runOnUiThread {
+                            playlistAdapter.add(createMediaItem(file.name, "Local Playlist", Uri.fromFile(file).toString()))
+                        }
+                    }
                 }
-                findPlaylistsSmb(uri)
+                scanRecursive(root)
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
-        } catch (e: Exception) {}
+        }.start()
     }
 
     private fun findPlaylistsLocal(uriString: String) {
@@ -358,45 +374,64 @@ class MainFragment : BrowseSupportFragment() {
         val rootUri = Uri.parse(uriString)
         Thread {
             try {
-                val treeUri = android.provider.DocumentsContract.getTreeDocumentId(rootUri)
-                val childrenUri = android.provider.DocumentsContract.buildChildDocumentsUriUsingTree(rootUri, treeUri)
-                val projection = arrayOf(
-                    android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                    android.provider.DocumentsContract.Document.COLUMN_DOCUMENT_ID
-                )
-                context.contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
-                    val nameCol = cursor.getColumnIndexOrThrow(android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-                    val idCol = cursor.getColumnIndexOrThrow(android.provider.DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-                    while (cursor.moveToNext()) {
-                        val name = cursor.getString(nameCol)
-                        if (name.lowercase().endsWith(".m3u") || name.lowercase().endsWith(".m3u8")) {
-                            val docId = cursor.getString(idCol)
-                            val itemUri = android.provider.DocumentsContract.buildDocumentUriUsingTree(rootUri, docId).toString()
-                            activity?.runOnUiThread {
-                                playlistAdapter.add(createMediaItem(name, "Local Playlist", itemUri))
+                fun scanRecursive(uri: Uri) {
+                    val treeId = android.provider.DocumentsContract.getTreeDocumentId(uri)
+                    val docId = try { android.provider.DocumentsContract.getDocumentId(uri) } catch (e: Exception) { treeId }
+                    val childrenUri = android.provider.DocumentsContract.buildChildDocumentsUriUsingTree(uri, docId)
+                    val projection = arrayOf(
+                        android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                        android.provider.DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                        android.provider.DocumentsContract.Document.COLUMN_MIME_TYPE
+                    )
+                    context.contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+                        val nameCol = cursor.getColumnIndexOrThrow(android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                        val idCol = cursor.getColumnIndexOrThrow(android.provider.DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                        val mimeCol = cursor.getColumnIndexOrThrow(android.provider.DocumentsContract.Document.COLUMN_MIME_TYPE)
+                        while (cursor.moveToNext()) {
+                            val name = cursor.getString(nameCol)
+                            val mime = cursor.getString(mimeCol)
+                            val childId = cursor.getString(idCol)
+                            val childUri = android.provider.DocumentsContract.buildDocumentUriUsingTree(uri, childId)
+                            
+                            if (mime == android.provider.DocumentsContract.Document.MIME_TYPE_DIR) {
+                                scanRecursive(childUri)
+                            } else if (name.lowercase().endsWith(".m3u") || name.lowercase().endsWith(".m3u8")) {
+                                activity?.runOnUiThread {
+                                    playlistAdapter.add(createMediaItem(name, "Local Playlist", childUri.toString()))
+                                }
                             }
                         }
                     }
                 }
-            } catch (e: Exception) {}
+                scanRecursive(rootUri)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }.start()
     }
 
     private fun findPlaylistsSmb(uri: String) {
         Thread {
             try {
-                val dir = SmbFile(uri)
-                val files = dir.listFiles() ?: emptyArray()
-                for (f in files) {
-                    if (f.name.lowercase().endsWith(".m3u") || f.name.lowercase().endsWith(".m3u8")) {
-                        val name = f.name
-                        val path = f.path
-                        activity?.runOnUiThread {
-                            playlistAdapter.add(createMediaItem(name, "SMB Playlist", path))
+                fun scanRecursive(smbUri: String) {
+                    val dir = SmbFile(smbUri)
+                    val files = try { dir.listFiles() } catch (e: Exception) { null } ?: emptyArray()
+                    for (f in files) {
+                        if (f.isDirectory) {
+                            scanRecursive(f.path)
+                        } else if (f.name.lowercase().endsWith(".m3u") || f.name.lowercase().endsWith(".m3u8")) {
+                            val name = f.name
+                            val path = f.path
+                            activity?.runOnUiThread {
+                                playlistAdapter.add(createMediaItem(name, "SMB Playlist", path))
+                            }
                         }
                     }
                 }
-            } catch (e: Exception) {}
+                scanRecursive(uri)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }.start()
     }
 
@@ -471,8 +506,12 @@ class MainFragment : BrowseSupportFragment() {
                         // It's an SMB file, play it or show options
                         handleSmbSelection(item.mediaId)
                     }
-                } else if (item.mediaId.startsWith("content://")) {
-                    browseLocalDirectory(item.mediaId)
+                } else if (item.mediaId.startsWith("content://") || item.mediaId.startsWith("file://")) {
+                    if (item.mediaId.startsWith("file://")) {
+                        browseFileStorage(Uri.parse(item.mediaId).path ?: "")
+                    } else {
+                        browseLocalDirectory(item.mediaId)
+                    }
                 } else if (row is ListRow) {
                     val activity = activity as? MainActivity
                     activity?.getController()?.let { controller ->
@@ -545,30 +584,16 @@ class MainFragment : BrowseSupportFragment() {
                         return@runOnUiThread
                     }
 
-                    val adapter = BrowseAdapter(context, browseItems)
-                    val builder = AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                        .setTitle(dir.name.removeSuffix("/"))
-                        .setAdapter(adapter) { _, which ->
-                            val item = browseItems[which]
-                            if (item.isDirectory) {
-                                browseSmbDirectory(item.path)
-                            } else {
-                                handleSmbSelection(item.path)
-                            }
-                        }
-                        .setNegativeButton("Back", null)
-                    
-                    val dialog = builder.create()
-                    dialog.show()
-                    
-                    dialog.listView.setOnItemLongClickListener { _, _, which, _ ->
+                    showBrowserDialog(dir.name.removeSuffix("/"), BrowseAdapter(context, browseItems), { which ->
                         val item = browseItems[which]
-                        if (item.isDirectory) {
-                            handleSmbSelection(item.path)
-                            dialog.dismiss()
-                        }
-                        true
-                    }
+                        if (item.isDirectory) browseSmbDirectory(item.path) else handleSmbSelection(item.path)
+                    }, { // Add All
+                        addSmbToPlaylist(dir, replace = false)
+                    }, { // Replace
+                        addSmbToPlaylist(dir, replace = true)
+                    }, { // Long click
+                        which -> handleSmbSelection(browseItems[which].path)
+                    })
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -641,30 +666,16 @@ class MainFragment : BrowseSupportFragment() {
                         return@runOnUiThread
                     }
 
-                    val adapter = BrowseAdapter(context, sortedItems)
-                    val builder = AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                        .setTitle("Browse Folder")
-                        .setAdapter(adapter) { _, which ->
-                            val item = sortedItems[which]
-                            if (item.isDirectory) {
-                                browseLocalDirectory(item.path)
-                            } else {
-                                handleLocalSelection(item.path, item.name)
-                            }
-                        }
-                        .setNegativeButton("Back", null)
-                    
-                    val dialog = builder.create()
-                    dialog.show()
-
-                    dialog.listView.setOnItemLongClickListener { _, _, which, _ ->
+                    showBrowserDialog("Browse Folder", BrowseAdapter(context, sortedItems), { which ->
                         val item = sortedItems[which]
-                        if (item.isDirectory) {
-                            handleLocalSelection(item.path, item.name)
-                            dialog.dismiss()
-                        }
-                        true
-                    }
+                        if (item.isDirectory) browseLocalDirectory(item.path) else handleLocalSelection(item.path, item.name)
+                    }, { // Add All
+                        addLocalToPlaylist(uriString, "Current Folder", replace = false)
+                    }, { // Replace
+                        addLocalToPlaylist(uriString, "Current Folder", replace = true)
+                    }, { // Long click
+                        which -> handleLocalSelection(sortedItems[which].path, sortedItems[which].name)
+                    })
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -676,6 +687,66 @@ class MainFragment : BrowseSupportFragment() {
         }.start()
     }
 
+    private fun showBrowserDialog(title: String, adapter: android.widget.ListAdapter, onItemClick: (Int) -> Unit, onAddAll: () -> Unit, onReplace: () -> Unit, onLongClick: (Int) -> Unit) {
+        val activity = activity ?: return
+        val builder = AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle(title)
+
+        val dialogView = android.widget.LinearLayout(activity).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(16, 16, 16, 16)
+        }
+
+        val listView = android.widget.ListView(activity).apply {
+            this.adapter = adapter
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                0, 1.0f
+            )
+        }
+        dialogView.addView(listView)
+
+        val buttonRow = android.widget.LinearLayout(activity).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val dialog = builder.setView(dialogView).create()
+
+        fun createBtn(text: String, onClick: () -> Unit) = android.widget.Button(activity).apply {
+            this.text = text
+            setOnClickListener {
+                onClick()
+                dialog.dismiss()
+            }
+            layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f)
+            isFocusable = true
+        }
+
+        buttonRow.addView(createBtn("Back") { dialog.dismiss() })
+        buttonRow.addView(createBtn("Add All") { onAddAll() })
+        buttonRow.addView(createBtn("Replace All") { onReplace() })
+
+        dialogView.addView(buttonRow)
+
+        listView.setOnItemClickListener { _, _, which, _ ->
+            onItemClick(which)
+            dialog.dismiss()
+        }
+
+        listView.setOnItemLongClickListener { _, _, which, _ ->
+            onLongClick(which)
+            dialog.dismiss()
+            true
+        }
+
+        dialog.show()
+    }
+
     private fun handleLocalSelection(uriString: String, name: String) {
         val context = activity ?: return
         val options = arrayOf("Add to current playlist", "Replace current playlist")
@@ -683,7 +754,12 @@ class MainFragment : BrowseSupportFragment() {
         AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle(name)
             .setItems(options) { _, which ->
-                addLocalToPlaylist(uriString, name, which == 1)
+                if (uriString.startsWith("file://")) {
+                    val file = java.io.File(Uri.parse(uriString).path ?: "")
+                    addFilesToPlaylist(file, which == 1)
+                } else {
+                    addLocalToPlaylist(uriString, name, which == 1)
+                }
             }
             .setNegativeButton("Cancel", null)
             .show()
@@ -751,15 +827,18 @@ class MainFragment : BrowseSupportFragment() {
 
             activity?.runOnUiThread {
                 if (itemsToAdd.isNotEmpty()) {
+                    // Sort items by track number extracted from title, then by title
+                    val sortedItems = itemsToAdd.sortedWith(compareBy({ extractTrackNumber(it.mediaMetadata.title.toString()) }, { it.mediaMetadata.title.toString().lowercase() }))
+                    
                     if (replace) {
-                        controller.setMediaItems(itemsToAdd)
+                        controller.setMediaItems(sortedItems)
                         controller.prepare()
                         controller.play()
                         val intent = android.content.Intent(requireContext(), NowPlayingActivity::class.java)
                         startActivity(intent)
                     } else {
-                        controller.addMediaItems(itemsToAdd)
-                        Toast.makeText(context, "Added ${itemsToAdd.size} items to playlist", Toast.LENGTH_SHORT).show()
+                        controller.addMediaItems(sortedItems)
+                        Toast.makeText(context, "Added ${sortedItems.size} items to playlist", Toast.LENGTH_SHORT).show()
                     }
                 } else {
                     Toast.makeText(context, "No playable music files found.", Toast.LENGTH_SHORT).show()
@@ -833,17 +912,20 @@ class MainFragment : BrowseSupportFragment() {
                     if (activity?.isFinishing == true) return@runOnUiThread
                     loadingToast.cancel()
                     if (itemsToAdd.isNotEmpty()) {
+                        // Sort items by track number extracted from title, then by title
+                        val sortedItems = itemsToAdd.sortedWith(compareBy({ extractTrackNumber(it.mediaMetadata.title.toString()) }, { it.mediaMetadata.title.toString().lowercase() }))
+                        
                         val controller = mainActivity?.getController()
                         if (controller != null) {
                             if (replace) {
-                                controller.setMediaItems(itemsToAdd)
+                                controller.setMediaItems(sortedItems)
                                 controller.prepare()
                                 controller.play()
                                 val intent = android.content.Intent(requireContext(), NowPlayingActivity::class.java)
                                 startActivity(intent)
                             } else {
-                                controller.addMediaItems(itemsToAdd)
-                                Toast.makeText(context, "Added ${itemsToAdd.size} items to playlist", Toast.LENGTH_SHORT).show()
+                                controller.addMediaItems(sortedItems)
+                                Toast.makeText(context, "Added ${sortedItems.size} items to playlist", Toast.LENGTH_SHORT).show()
                             }
                         }
                     } else {
@@ -861,9 +943,230 @@ class MainFragment : BrowseSupportFragment() {
         }.start()
     }
 
+    private fun checkAndBrowseInternalStorage(isSelectionMode: Boolean = false) {
+        val context = requireContext()
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            if (android.os.Environment.isExternalStorageManager()) {
+                browseFileStorage(android.os.Environment.getExternalStorageDirectory().absolutePath, isSelectionMode)
+            } else {
+                AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                    .setTitle("All Files Access Required")
+                    .setMessage("To browse storage directly on Android TV 11+, please grant 'All Files Access' in the system settings.")
+                    .setPositiveButton("Settings") { _, _ ->
+                        try {
+                            val intent = android.content.Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                            intent.data = android.net.Uri.parse("package:${context.packageName}")
+                            startActivity(intent)
+                        } catch (e: Exception) {
+                            val intent = android.content.Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                            startActivity(intent)
+                        }
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+        } else {
+            browseFileStorage(android.os.Environment.getExternalStorageDirectory().absolutePath, isSelectionMode)
+        }
+    }
+
+    private fun browseFileStorage(path: String, isSelectionMode: Boolean = false) {
+        val context = activity ?: return
+        val currentDir = java.io.File(path)
+        val loadingToast = Toast.makeText(context, "Reading folder...", Toast.LENGTH_SHORT)
+        loadingToast.show()
+
+        Thread {
+            try {
+                val files = currentDir.listFiles() ?: emptyArray()
+                val items = mutableListOf<BrowseItem>()
+
+                for (file in files) {
+                    if (file.name.startsWith(".")) continue
+                    
+                    if (file.isDirectory) {
+                        items.add(BrowseItem(file.name, file.absolutePath, R.drawable.ic_folder, true))
+                    } else if (!isSelectionMode && isPlayable(file.name)) {
+                        val icon = if (file.name.lowercase().endsWith(".m3u") || file.name.lowercase().endsWith(".m3u8")) R.drawable.ic_playlist else R.drawable.ic_audio
+                        items.add(BrowseItem(file.name, file.absolutePath, icon, false))
+                    }
+                }
+
+                val sortedItems = items.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
+
+                activity?.runOnUiThread {
+                    loadingToast.cancel()
+                    
+                    val title = if (isSelectionMode) "Select Folder to Add" else currentDir.name.ifEmpty { "Storage" }
+                    
+                    if (isSelectionMode) {
+                        showFolderSelectionDialog(title, BrowseAdapter(context, sortedItems), { which ->
+                            val item = sortedItems[which]
+                            if (item.isDirectory) browseFileStorage(item.path, true)
+                        }, { // Add Folder
+                            saveMusicFolder(android.net.Uri.fromFile(currentDir).toString(), true)
+                        })
+                    } else {
+                        showBrowserDialog(title, BrowseAdapter(context, sortedItems), { which ->
+                            val item = sortedItems[which]
+                            if (item.isDirectory) browseFileStorage(item.path) else handleFileSelection(item.path, item.name)
+                        }, { // Add All
+                            addFilesToPlaylist(currentDir, replace = false)
+                        }, { // Replace
+                            addFilesToPlaylist(currentDir, replace = true)
+                        }, { // Long click
+                            which -> handleFileSelection(sortedItems[which].path, sortedItems[which].name)
+                        })
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                activity?.runOnUiThread {
+                    loadingToast.cancel()
+                    Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun showFolderSelectionDialog(title: String, adapter: android.widget.ListAdapter, onItemClick: (Int) -> Unit, onAddFolder: () -> Unit) {
+        val activity = activity ?: return
+        val builder = AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle(title)
+
+        val dialogView = android.widget.LinearLayout(activity).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(16, 16, 16, 16)
+        }
+
+        val listView = android.widget.ListView(activity).apply {
+            this.adapter = adapter
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                0, 1.0f
+            )
+        }
+        dialogView.addView(listView)
+
+        val buttonRow = android.widget.LinearLayout(activity).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val dialog = builder.setView(dialogView).create()
+
+        fun createBtn(text: String, onClick: () -> Unit) = android.widget.Button(activity).apply {
+            this.text = text
+            setOnClickListener {
+                onClick()
+                dialog.dismiss()
+            }
+            layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f)
+            isFocusable = true
+        }
+
+        buttonRow.addView(createBtn("Back") { dialog.dismiss() })
+        buttonRow.addView(createBtn("Add Folder") { onAddFolder() })
+
+        dialogView.addView(buttonRow)
+
+        listView.setOnItemClickListener { _, _, which, _ ->
+            onItemClick(which)
+            dialog.dismiss()
+        }
+
+        dialog.show()
+    }
+
+    private fun handleFileSelection(path: String, name: String) {
+        val context = activity ?: return
+        val file = java.io.File(path)
+        val isDir = file.isDirectory
+        
+        val options = if (isDir) {
+            arrayOf("Add to current playlist", "Replace current playlist", "Add to Music Library")
+        } else {
+            arrayOf("Add to current playlist", "Replace current playlist")
+        }
+        
+        AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle(name)
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> addFilesToPlaylist(file, false)
+                    1 -> addFilesToPlaylist(file, true)
+                    2 -> if (isDir) saveMusicFolder(android.net.Uri.fromFile(file).toString(), true)
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun addFilesToPlaylist(root: java.io.File, replace: Boolean) {
+        val context = activity ?: return
+        val mainActivity = activity as? MainActivity
+        val controller = mainActivity?.getController() ?: return
+        val loadingToast = Toast.makeText(context, "Processing files...", Toast.LENGTH_SHORT)
+        loadingToast.show()
+
+        Thread {
+            val itemsToAdd = mutableListOf<MediaItem>()
+            
+            fun scanRecursive(file: java.io.File) {
+                if (file.isDirectory) {
+                    file.listFiles()?.forEach { scanRecursive(it) }
+                } else if (isPlayable(file.name)) {
+                    if (file.name.lowercase().endsWith(".m3u") || file.name.lowercase().endsWith(".m3u8")) {
+                        try {
+                            java.io.FileInputStream(file).use { stream ->
+                                itemsToAdd.addAll(mainActivity?.parseM3uFromStream(stream) ?: emptyList())
+                            }
+                        } catch (e: Exception) {}
+                    } else {
+                        val uri = android.net.Uri.fromFile(file).toString()
+                        itemsToAdd.add(createMediaItem(file.name, "Local Storage", uri))
+                    }
+                }
+            }
+
+            scanRecursive(root)
+
+            activity?.runOnUiThread {
+                loadingToast.cancel()
+                if (itemsToAdd.isNotEmpty()) {
+                    val sortedItems = itemsToAdd.sortedWith(compareBy({ extractTrackNumber(it.mediaMetadata.title.toString()) }, { it.mediaMetadata.title.toString().lowercase() }))
+                    
+                    if (replace) {
+                        controller.setMediaItems(sortedItems)
+                        controller.prepare()
+                        controller.play()
+                        val intent = android.content.Intent(requireContext(), NowPlayingActivity::class.java)
+                        startActivity(intent)
+                    } else {
+                        controller.addMediaItems(sortedItems)
+                        Toast.makeText(context, "Added ${sortedItems.size} items", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    Toast.makeText(context, "No music found.", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }.start()
+    }
+
     private fun isPlayable(filename: String): Boolean {
         val extensions = listOf(".mp3", ".flac", ".wav", ".m4a", ".aac", ".ogg", ".wma", ".m3u", ".m3u8")
         return extensions.any { filename.lowercase().endsWith(it) }
+    }
+
+    private fun extractTrackNumber(title: String): Int {
+        val cleanTitle = title.trim()
+        val regex = Regex("^(\\d+)")
+        val match = regex.find(cleanTitle)
+        return match?.value?.toInt() ?: Int.MAX_VALUE
     }
 
     private fun hasPlayableContent(context: Context, treeUri: Uri, docId: String): Boolean {
@@ -895,12 +1198,11 @@ class MainFragment : BrowseSupportFragment() {
     private fun getScreensaverLabel(): String {
         val mins = requireContext().getSharedPreferences(PREFS_SETTINGS, Context.MODE_PRIVATE)
             .getInt(KEY_SCREENSAVER, 0)
-        return when (mins) {
-            0 -> "Off"
-            1 -> "1 min"
-            5 -> "5 min"
-            15 -> "15 min"
-            else -> "$mins min"
+        return when {
+            mins == 0 -> "Off"
+            mins > 0 -> "Bouncing ($mins min)"
+            mins < 0 -> "Black (${Math.abs(mins)} min)"
+            else -> "Off"
         }
     }
 
@@ -909,6 +1211,9 @@ class MainFragment : BrowseSupportFragment() {
 
     private fun isRecentEnabled() = requireContext().getSharedPreferences(PREFS_SETTINGS, Context.MODE_PRIVATE)
         .getBoolean(KEY_RECENT, true)
+
+    private fun isAutoScanEnabled() = requireContext().getSharedPreferences(PREFS_SETTINGS, Context.MODE_PRIVATE)
+        .getBoolean(KEY_AUTO_SCAN, false)
 
     private fun loadRecentFiles(adapter: ArrayObjectAdapter) {
         val settings = requireContext().getSharedPreferences(PREFS_SETTINGS, Context.MODE_PRIVATE)
@@ -923,8 +1228,12 @@ class MainFragment : BrowseSupportFragment() {
     }
 
     private fun showScreensaverSettings() {
-        val options = arrayOf("Delay: Off", "Delay: 1 min", "Delay: 5 min", "Delay: 15 min")
-        val values = intArrayOf(0, 1, 5, 15)
+        val options = arrayOf(
+            "Off", 
+            "Screensaver: 1 min", "Screensaver: 5 min", "Screensaver: 15 min",
+            "Turn Screen Off: 1 min", "Turn Screen Off: 5 min", "Turn Screen Off: 15 min"
+        )
+        val values = intArrayOf(0, 1, 5, 15, -1, -5, -15)
         val current = requireContext().getSharedPreferences(PREFS_SETTINGS, Context.MODE_PRIVATE)
             .getInt(KEY_SCREENSAVER, 0)
         var checkedItem = values.indexOf(current)
@@ -973,7 +1282,7 @@ class MainFragment : BrowseSupportFragment() {
             .setTitle("Music Folders")
             .setItems(options) { _, which ->
                 when (which) {
-                    0 -> pickLocalFolder()
+                    0 -> checkAndBrowseInternalStorage(isSelectionMode = true)
                     1 -> showAddSmbDialog()
                     2 -> viewConfiguredFolders()
                 }
@@ -1223,30 +1532,121 @@ class MainFragment : BrowseSupportFragment() {
 
     private fun resumeLastPlayed() {
         val settings = requireContext().getSharedPreferences(PREFS_SETTINGS, Context.MODE_PRIVATE)
-        val uri = settings.getString("last_played_uri", null) ?: return
+        val queueJson = settings.getString("last_played_queue", null) ?: return
         val pos = settings.getLong("last_played_pos", 0)
-        val title = settings.getString("last_played_title", "Music") ?: "Music"
-        val artist = settings.getString("last_played_artist", "") ?: ""
+        val index = settings.getInt("last_played_index", 0)
         
-        val mediaItem = createMediaItem(title, artist, uri)
-        
-        val activity = activity as? MainActivity
-        activity?.getController()?.let { controller ->
-            controller.setMediaItem(mediaItem)
-            controller.seekTo(pos)
-            controller.prepare()
-            controller.play()
+        try {
+            val queueArray = JSONArray(queueJson)
+            val items = mutableListOf<MediaItem>()
+            for (i in 0 until queueArray.length()) {
+                val uri = queueArray.getString(i)
+                val title = if (uri.startsWith("smb://")) {
+                    val decoded = Uri.decode(uri.substringAfterLast("/").takeIf { it.isNotEmpty() } ?: uri)
+                    decoded.substringBeforeLast(".") // Remove extension for cleaner title
+                } else {
+                    val segment = Uri.parse(uri).lastPathSegment ?: uri
+                    segment.substringBeforeLast(".")
+                }
+                items.add(createMediaItem(title, "", uri)) // Leave artist empty to let tag reader fill it
+            }
             
-            val intent = android.content.Intent(requireContext(), NowPlayingActivity::class.java)
-            startActivity(intent)
+            if (items.isEmpty()) return
+            
+            val activity = activity as? MainActivity
+            activity?.getController()?.let { controller ->
+                controller.setMediaItems(items, index, pos)
+                controller.prepare()
+                controller.play()
+                
+                val intent = android.content.Intent(requireContext(), NowPlayingActivity::class.java)
+                startActivity(intent)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
+    }
+
+    private fun clearRecentFiles() {
+        val prefs = requireContext().getSharedPreferences(PREFS_SETTINGS, Context.MODE_PRIVATE)
+        prefs.edit().putString("recent_list", "[]").apply()
+        refreshRows()
+        Toast.makeText(requireContext(), "Recent files cleared", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun showRecentFilesMenu() {
+        val prefs = requireContext().getSharedPreferences(PREFS_SETTINGS, Context.MODE_PRIVATE)
+        val isEnabled = prefs.getBoolean(KEY_RECENT, true)
+        val options = arrayOf(
+            if (isEnabled) "Remember Recent Files: Enabled" else "Remember Recent Files: Disabled",
+            "Clear Recent List"
+        )
+        AlertDialog.Builder(requireContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Recent Files Settings")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> {
+                        toggleRecentFiles()
+                        showRecentFilesMenu() // Show again to reflect toggle
+                    }
+                    1 -> clearRecentFiles()
+                }
+            }
+            .setNegativeButton("Back", null)
+            .show()
+    }
+
+    private fun showScanLibraryMenu() {
+        val prefs = requireContext().getSharedPreferences(PREFS_SETTINGS, Context.MODE_PRIVATE)
+        val autoScan = prefs.getBoolean(KEY_AUTO_SCAN, false)
+        val options = arrayOf(
+            "Perform Library Scan Now",
+            if (autoScan) "Automatic Library Scan: Enabled" else "Automatic Library Scan: Disabled"
+        )
+        AlertDialog.Builder(requireContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Scan Library Settings")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> showScanConfirmationDialog()
+                    1 -> {
+                        toggleAutoScan()
+                        showScanLibraryMenu() // Show again to reflect toggle
+                    }
+                }
+            }
+            .setNegativeButton("Back", null)
+            .show()
+    }
+
+    private fun showScanConfirmationDialog() {
+        AlertDialog.Builder(requireContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Perform Scan")
+            .setMessage("Scan all configured folders for new or deleted files?")
+            .setPositiveButton("Yes") { _, _ -> performLibraryScan() }
+            .setNegativeButton("No", null)
+            .show()
+    }
+
+    private fun toggleAutoScan() {
+        val prefs = requireContext().getSharedPreferences(PREFS_SETTINGS, Context.MODE_PRIVATE)
+        val current = prefs.getBoolean(KEY_AUTO_SCAN, false)
+        prefs.edit().putBoolean(KEY_AUTO_SCAN, !current).apply()
+        refreshRows()
+    }
+
+    private fun performLibraryScan() {
+        Toast.makeText(requireContext(), "Scanning library...", Toast.LENGTH_SHORT).show()
+        updatePlaylistRow()
+        refreshRows()
+        // Here we could add more logic to deep scan folders if needed
+        Toast.makeText(requireContext(), "Library scan complete", Toast.LENGTH_SHORT).show()
     }
 
     private fun handleAction(actionId: String) {
         val activity = activity as? MainActivity
         when {
-            actionId == "action:Add Local Files" -> {
-                activity?.pickFiles()
+            actionId == "action:Internal Storage" -> {
+                checkAndBrowseInternalStorage()
             }
             actionId == "action:Add SMB Source" -> {
                 showAddSmbDialog()
@@ -1258,18 +1658,21 @@ class MainFragment : BrowseSupportFragment() {
                 toggleResumePlayback()
             }
             actionId == "action:Recent Files" -> {
-                toggleRecentFiles()
+                showRecentFilesMenu()
             }
             actionId == "action:Music Folders" -> {
                 manageMusicFolders()
             }
             actionId == "action:Scan Library" -> {
-                updatePlaylistRow()
-                refreshRows()
-                Toast.makeText(requireContext(), "Music library updated", Toast.LENGTH_SHORT).show()
+                showScanLibraryMenu()
             }
             actionId == "action:Resume Last Played" -> {
                 resumeLastPlayed()
+            }
+            actionId == "action:Exit" -> {
+                activity?.stopService(android.content.Intent(requireContext(), PlaybackService::class.java))
+                activity?.finishAffinity()
+                System.exit(0)
             }
             actionId.startsWith("action:NOW:") -> {
                 val intent = android.content.Intent(requireContext(), NowPlayingActivity::class.java)

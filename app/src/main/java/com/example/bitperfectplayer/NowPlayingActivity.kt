@@ -26,6 +26,7 @@ class NowPlayingActivity : FragmentActivity() {
     
     private lateinit var textTitle: TextView
     private lateinit var textArtist: TextView
+    private lateinit var textAlbum: TextView
     private lateinit var textPlaylistPos: TextView
     private lateinit var textBitrate: TextView
     private lateinit var textCurrentTime: TextView
@@ -42,6 +43,7 @@ class NowPlayingActivity : FragmentActivity() {
 
         textTitle = findViewById(R.id.text_title)
         textArtist = findViewById(R.id.text_artist)
+        textAlbum = findViewById(R.id.text_album)
         textPlaylistPos = findViewById(R.id.text_playlist_pos)
         textBitrate = findViewById(R.id.text_bitrate)
         textCurrentTime = findViewById(R.id.text_current_time)
@@ -117,8 +119,9 @@ class NowPlayingActivity : FragmentActivity() {
     private fun resetScreensaverTimer() {
         screensaverHandler.removeCallbacks(screensaverRunnable)
         val mins = getSharedPreferences("AppSettings", MODE_PRIVATE).getInt("screensaver_delay", 0)
-        if (mins > 0 && mediaController?.isPlaying == true) {
-            screensaverHandler.postDelayed(screensaverRunnable, mins * 60 * 1000L)
+        if (mins != 0 && mediaController?.isPlaying == true) {
+            val finalMins = Math.abs(mins)
+            screensaverHandler.postDelayed(screensaverRunnable, finalMins * 60 * 1000L)
         }
     }
 
@@ -126,6 +129,9 @@ class NowPlayingActivity : FragmentActivity() {
         if (isFinishing || isDestroyed || isScreensaverActive) return
         if (window.decorView.findViewWithTag<android.view.View>("screensaver_overlay") != null) return
         
+        val mins = getSharedPreferences("AppSettings", MODE_PRIVATE).getInt("screensaver_delay", 0)
+        if (mins == 0) return
+
         isScreensaverActive = true
         // Simple black overlay for screensaver
         val overlay = android.widget.FrameLayout(this)
@@ -140,10 +146,15 @@ class NowPlayingActivity : FragmentActivity() {
         )
         addContentView(overlay, params)
         
+        if (mins < 0) {
+            // Completely black mode - no text
+            return
+        }
+
         // Add moving text to prevent burn-in
         val textView = TextView(this)
-        val title = mediaController?.currentMediaItem?.mediaMetadata?.title ?: "Music"
-        textView.text = "Now Playing: $title"
+        textView.tag = "screensaver_text"
+        updateScreensaverText(textView)
         textView.setTextColor(android.graphics.Color.DKGRAY)
         textView.textSize = 24f
         val textParams = android.widget.FrameLayout.LayoutParams(
@@ -175,6 +186,139 @@ class NowPlayingActivity : FragmentActivity() {
         handler.post(moveRunnable)
     }
 
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (resultCode == RESULT_OK) {
+            if (requestCode == 2001 || requestCode == 2002) {
+                val uris = mutableListOf<android.net.Uri>()
+                data?.let {
+                    if (it.clipData != null) {
+                        for (i in 0 until it.clipData!!.itemCount) {
+                            uris.add(it.clipData!!.getItemAt(i).uri)
+                        }
+                    } else if (it.data != null) {
+                        uris.add(it.data!!)
+                    }
+                }
+                if (uris.isNotEmpty()) {
+                    val loadingToast = android.widget.Toast.makeText(this, "Loading items...", android.widget.Toast.LENGTH_LONG)
+                    loadingToast.show()
+                    
+                    Thread {
+                        val allItems = mutableListOf<androidx.media3.common.MediaItem>()
+                        for (uri in uris) {
+                            try {
+                                contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            } catch (e: Exception) {}
+                            
+                            val fileName = uri.lastPathSegment?.lowercase() ?: ""
+                            if (fileName.endsWith(".m3u") || fileName.endsWith(".m3u8")) {
+                                try {
+                                    contentResolver.openInputStream(uri)?.use { stream ->
+                                        allItems.addAll(parseM3uLocal(stream, uri))
+                                    }
+                                } catch (e: Exception) { e.printStackTrace() }
+                            } else {
+                                val title = uri.lastPathSegment?.substringBeforeLast(".") ?: "Track"
+                                allItems.add(androidx.media3.common.MediaItem.Builder()
+                                    .setMediaId(uri.toString())
+                                    .setUri(uri)
+                                    .setMediaMetadata(androidx.media3.common.MediaMetadata.Builder().setTitle(title).build())
+                                    .build())
+                            }
+                        }
+
+                        runOnUiThread {
+                            loadingToast.cancel()
+                            if (allItems.isNotEmpty()) {
+                                if (requestCode == 2002) {
+                                    mediaController?.setMediaItems(allItems)
+                                } else {
+                                    mediaController?.addMediaItems(allItems)
+                                }
+                                
+                                mediaController?.prepare()
+                                mediaController?.play()
+                                
+                                android.widget.Toast.makeText(this, "Loaded ${allItems.size} items", android.widget.Toast.LENGTH_SHORT).show()
+                                updateUI()
+                            }
+                        }
+                    }.start()
+                }
+            } else if (requestCode == 2003) {
+                data?.data?.let { uri ->
+                    contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    addDirectoryToPlaylist(uri)
+                }
+            }
+        }
+    }
+
+    private fun parseM3uLocal(inputStream: java.io.InputStream, baseUri: android.net.Uri): List<androidx.media3.common.MediaItem> {
+        val items = mutableListOf<androidx.media3.common.MediaItem>()
+        try {
+            val reader = java.io.BufferedReader(java.io.InputStreamReader(inputStream))
+            var line: String?
+            var currentTitle: String? = null
+            
+            while (reader.readLine().also { line = it } != null) {
+                val trimmed = line!!.trim()
+                if (trimmed.isEmpty()) continue
+                
+                if (trimmed.startsWith("#EXTINF:")) {
+                    val commaIndex = trimmed.indexOf(",")
+                    if (commaIndex != -1) {
+                        currentTitle = trimmed.substring(commaIndex + 1)
+                    }
+                } else if (!trimmed.startsWith("#")) {
+                    val itemUri = try {
+                        when {
+                            trimmed.startsWith("/") -> android.net.Uri.parse("file://$trimmed")
+                            trimmed.startsWith("file://") || trimmed.startsWith("content://") ||
+                            trimmed.startsWith("http://") || trimmed.startsWith("https://") ||
+                            trimmed.startsWith("smb://") -> android.net.Uri.parse(trimmed)
+                            else -> null
+                        }
+                    } catch (e: Exception) { null }
+
+                    if (itemUri != null) {
+                        items.add(
+                            androidx.media3.common.MediaItem.Builder()
+                                .setMediaId(trimmed)
+                                .setUri(itemUri)
+                                .setMediaMetadata(
+                                    androidx.media3.common.MediaMetadata.Builder()
+                                        .setTitle(currentTitle ?: itemUri.lastPathSegment ?: trimmed)
+                                        .build()
+                                )
+                                .build()
+                        )
+                    }
+                    currentTitle = null
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return items
+    }
+
+    private fun updateScreensaverText(textView: TextView) {
+        val mediaItem = mediaController?.currentMediaItem
+        val metadata = mediaItem?.mediaMetadata
+        val title = metadata?.title ?: "Music"
+        val artist = metadata?.artist ?: "Unknown Artist"
+        val album = metadata?.albumTitle ?: "Unknown Album"
+        
+        // Track number if available in metadata
+        val trackNum = metadata?.trackNumber
+        val trackPrefix = if (trackNum != null) "$trackNum. " else ""
+        
+        textView.text = "Now Playing:\n$trackPrefix$title\n$artist\n$album"
+        textView.textAlignment = android.view.View.TEXT_ALIGNMENT_CENTER
+    }
+
     private fun hideScreensaver() {
         isScreensaverActive = false
         val overlay = window.decorView.findViewWithTag<android.view.View>("screensaver_overlay")
@@ -186,6 +330,11 @@ class NowPlayingActivity : FragmentActivity() {
         controller.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) {
                 updateUI()
+                refreshScreensaver()
+            }
+            override fun onMediaMetadataChanged(mediaMetadata: androidx.media3.common.MediaMetadata) {
+                updateUI()
+                refreshScreensaver()
             }
             override fun onPlaybackStateChanged(playbackState: Int) {
                 updateUI()
@@ -211,19 +360,38 @@ class NowPlayingActivity : FragmentActivity() {
         startProgressUpdate()
     }
 
+    private fun refreshScreensaver() {
+        if (isScreensaverActive) {
+            val screensaverText = window.decorView.findViewWithTag<TextView>("screensaver_text")
+            if (screensaverText != null) {
+                updateScreensaverText(screensaverText)
+            }
+        }
+    }
+
     @OptIn(UnstableApi::class)
     private fun updateUI() {
         val controller = mediaController ?: return
         val mediaItem = controller.currentMediaItem
-        textTitle.text = mediaItem?.mediaMetadata?.title ?: "Unknown"
+        val metadata = mediaItem?.mediaMetadata
         
-        // Show artist or subtitle (useful for streams)
-        val artist = mediaItem?.mediaMetadata?.artist
-        val subtitle = mediaItem?.mediaMetadata?.subtitle
+        textTitle.text = metadata?.title ?: "Unknown Title"
+        
+        val artist = metadata?.artist
+        val subtitle = metadata?.subtitle
         textArtist.text = when {
             !artist.isNullOrEmpty() -> artist
             !subtitle.isNullOrEmpty() -> subtitle
-            else -> "Unknown"
+            else -> "Unknown Artist"
+        }
+
+        // Try to get album from albumTitle or potentially other fields
+        val album = metadata?.albumTitle
+        if (!album.isNullOrEmpty()) {
+            textAlbum.text = album.toString()
+            textAlbum.visibility = android.view.View.VISIBLE
+        } else {
+            textAlbum.visibility = android.view.View.GONE
         }
         
         val current = controller.currentMediaItemIndex + 1
@@ -315,10 +483,6 @@ class NowPlayingActivity : FragmentActivity() {
     private fun showPlaylist() {
         val controller = mediaController ?: return
         val count = controller.mediaItemCount
-        if (count == 0) {
-            android.widget.Toast.makeText(this, "Playlist is empty", android.widget.Toast.LENGTH_SHORT).show()
-            return
-        }
         
         val items = mutableListOf<String>()
         for (i in 0 until count) {
@@ -327,7 +491,7 @@ class NowPlayingActivity : FragmentActivity() {
         }
 
         // Custom adapter for playlist with icons
-        val adapter = object : android.widget.ArrayAdapter<String>(this, R.layout.list_item_browse, items) {
+        val playlistAdapter = object : android.widget.ArrayAdapter<String>(this, R.layout.list_item_browse, items) {
             override fun getView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View {
                 val view = convertView ?: android.view.LayoutInflater.from(context).inflate(R.layout.list_item_browse, parent, false)
                 val text = view.findViewById<TextView>(R.id.item_text)
@@ -349,12 +513,138 @@ class NowPlayingActivity : FragmentActivity() {
 
         val builder = android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
         builder.setTitle("Current Playlist")
-        builder.setAdapter(adapter) { _, which ->
+        
+        val dialogView = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(16, 16, 16, 16)
+        }
+
+        val listView = android.widget.ListView(this).apply {
+            adapter = playlistAdapter
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                0, 1.0f
+            )
+        }
+        dialogView.addView(listView)
+
+        val buttonRow = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val dialog = builder.setView(dialogView).create()
+
+        fun createBtn(text: String, onClick: () -> Unit) = android.widget.Button(this).apply {
+            this.text = text
+            setOnClickListener {
+                onClick()
+                dialog.dismiss()
+            }
+            layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f)
+        }
+
+        buttonRow.addView(createBtn("Back") { dialog.dismiss() })
+        buttonRow.addView(createBtn("Clear") { 
+            controller.clearMediaItems()
+            android.widget.Toast.makeText(this@NowPlayingActivity, "Playlist cleared", android.widget.Toast.LENGTH_SHORT).show()
+            updateUI()
+        })
+        buttonRow.addView(createBtn("Add Files") {
+            val intent = android.content.Intent(android.content.Intent.ACTION_GET_CONTENT)
+            intent.type = "audio/*"
+            intent.putExtra(android.content.Intent.EXTRA_ALLOW_MULTIPLE, true)
+            startActivityForResult(intent, 2001)
+        })
+        buttonRow.addView(createBtn("Add Directory") {
+            val intent = android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT_TREE)
+            startActivityForResult(intent, 2003)
+        })
+
+        dialogView.addView(buttonRow)
+
+        listView.setOnItemClickListener { _, _, which, _ ->
             controller.seekTo(which, 0)
             controller.play()
+            dialog.dismiss()
         }
-        builder.setNegativeButton("Close", null)
-        builder.show()
+
+        dialog.show()
+    }
+
+    private fun addDirectoryToPlaylist(uri: android.net.Uri) {
+        val loadingToast = android.widget.Toast.makeText(this, "Scanning directory...", android.widget.Toast.LENGTH_LONG)
+        loadingToast.show()
+        
+        Thread {
+            val itemsToAdd = mutableListOf<androidx.media3.common.MediaItem>()
+            
+            fun scanRecursive(dirUri: android.net.Uri) {
+                try {
+                    val treeId = android.provider.DocumentsContract.getTreeDocumentId(dirUri)
+                    val childrenUri = android.provider.DocumentsContract.buildChildDocumentsUriUsingTree(dirUri, treeId)
+                    val projection = arrayOf(
+                        android.provider.DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                        android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                        android.provider.DocumentsContract.Document.COLUMN_MIME_TYPE
+                    )
+                    contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+                        val idCol = cursor.getColumnIndexOrThrow(android.provider.DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                        val nameCol = cursor.getColumnIndexOrThrow(android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                        val mimeCol = cursor.getColumnIndexOrThrow(android.provider.DocumentsContract.Document.COLUMN_MIME_TYPE)
+                        
+                        while (cursor.moveToNext()) {
+                            val id = cursor.getString(idCol)
+                            val name = cursor.getString(nameCol)
+                            val mime = cursor.getString(mimeCol)
+                            val childUri = android.provider.DocumentsContract.buildDocumentUriUsingTree(dirUri, id)
+                            
+                            if (mime == android.provider.DocumentsContract.Document.MIME_TYPE_DIR) {
+                                scanRecursive(childUri)
+                            } else if (isPlayable(name)) {
+                                if (name.lowercase().endsWith(".m3u") || name.lowercase().endsWith(".m3u8")) {
+                                    contentResolver.openInputStream(childUri)?.use { stream ->
+                                        itemsToAdd.addAll(parseM3uLocal(stream, childUri))
+                                    }
+                                } else {
+                                    val title = name.substringBeforeLast(".")
+                                    itemsToAdd.add(androidx.media3.common.MediaItem.Builder()
+                                        .setMediaId(childUri.toString())
+                                        .setUri(childUri)
+                                        .setMediaMetadata(androidx.media3.common.MediaMetadata.Builder().setTitle(title).build())
+                                        .build())
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) { e.printStackTrace() }
+            }
+
+            scanRecursive(uri)
+
+            runOnUiThread {
+                loadingToast.cancel()
+                if (itemsToAdd.isNotEmpty()) {
+                    val sortedItems = itemsToAdd.sortedBy { it.mediaMetadata.title?.toString()?.lowercase() }
+                    mediaController?.addMediaItems(sortedItems)
+                    mediaController?.prepare()
+                    mediaController?.play()
+                    android.widget.Toast.makeText(this, "Added ${sortedItems.size} items", android.widget.Toast.LENGTH_SHORT).show()
+                    updateUI()
+                } else {
+                    android.widget.Toast.makeText(this, "No music found in directory", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun isPlayable(filename: String): Boolean {
+        val extensions = listOf(".mp3", ".flac", ".wav", ".m4a", ".aac", ".ogg", ".wma", ".m3u", ".m3u8")
+        return extensions.any { filename.lowercase().endsWith(it) }
     }
 
     private fun startProgressUpdate() {

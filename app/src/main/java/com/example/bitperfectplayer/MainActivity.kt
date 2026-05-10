@@ -171,16 +171,44 @@ class MainActivity : FragmentActivity() {
 
     fun pickFiles() {
         try {
-            // Include m3u/playlist mime types
-            pickFileLauncher.launch(arrayOf(
+            val intent = android.content.Intent(android.content.Intent.ACTION_GET_CONTENT)
+            intent.type = "audio/*"
+            intent.putExtra(android.content.Intent.EXTRA_ALLOW_MULTIPLE, true)
+            intent.addCategory(android.content.Intent.CATEGORY_OPENABLE)
+            
+            // Define MIME types explicitly to include playlists
+            val mimeTypes = arrayOf(
                 "audio/*", 
                 "application/octet-stream", 
                 "application/x-mpegurl", 
                 "audio/mpegurl",
                 "audio/x-mpegurl"
-            ))
+            )
+            intent.putExtra(android.content.Intent.EXTRA_MIME_TYPES, mimeTypes)
+            
+            startActivityForResult(intent, 2001)
         } catch (e: Exception) {
-            Toast.makeText(this, "File picker not available.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "File manager not found.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 2001 && resultCode == RESULT_OK) {
+            val uris = mutableListOf<Uri>()
+            data?.let {
+                if (it.clipData != null) {
+                    val count = it.clipData!!.itemCount
+                    for (i in 0 until count) {
+                        uris.add(it.clipData!!.getItemAt(i).uri)
+                    }
+                } else if (it.data != null) {
+                    uris.add(it.data!!)
+                }
+            }
+            if (uris.isNotEmpty()) {
+                addUrisToPlaylist(uris)
+            }
         }
     }
 

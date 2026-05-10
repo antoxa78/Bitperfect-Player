@@ -7,14 +7,14 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.BaseDataSource
 import androidx.media3.datasource.DataSpec
 import jcifs.smb.SmbFile
-import jcifs.smb.SmbFileInputStream
+import jcifs.smb.SmbRandomAccessFile
 import java.io.IOException
 
 @OptIn(UnstableApi::class)
 class SmbDataSource : BaseDataSource(true) {
 
     private var file: SmbFile? = null
-    private var inputStream: SmbFileInputStream? = null
+    private var randomAccessFile: SmbRandomAccessFile? = null
     private var uri: Uri? = null
     private var bytesRemaining: Long = 0
     private var opened = false
@@ -26,21 +26,18 @@ class SmbDataSource : BaseDataSource(true) {
         
         try {
             file = SmbFile(path)
-            val inputStream = SmbFileInputStream(file!!)
-            this.inputStream = inputStream
+            val raf = SmbRandomAccessFile(file!!, "r")
+            this.randomAccessFile = raf
             
             if (dataSpec.position > 0) {
-                val skipped = inputStream.skip(dataSpec.position)
-                if (skipped < dataSpec.position) {
-                    throw IOException("Could not skip to requested position")
-                }
+                raf.seek(dataSpec.position)
             }
             
+            val fileLength = file?.length() ?: 0L
             bytesRemaining = if (dataSpec.length != C.LENGTH_UNSET.toLong()) {
                 dataSpec.length
             } else {
-                val len = file?.length() ?: 0L
-                if (len > 0) len - dataSpec.position else C.LENGTH_UNSET.toLong()
+                if (fileLength > 0) fileLength - dataSpec.position else C.LENGTH_UNSET.toLong()
             }
         } catch (e: Exception) {
             throw IOException(e)
@@ -59,7 +56,7 @@ class SmbDataSource : BaseDataSource(true) {
                           else Math.min(bytesRemaining, length.toLong()).toInt()
         
         val bytesRead = try {
-            inputStream?.read(buffer, offset, bytesToRead) ?: -1
+            randomAccessFile?.read(buffer, offset, bytesToRead) ?: -1
         } catch (e: IOException) {
             throw IOException(e)
         }
@@ -81,11 +78,11 @@ class SmbDataSource : BaseDataSource(true) {
     override fun close() {
         uri = null
         try {
-            inputStream?.close()
+            randomAccessFile?.close()
         } catch (e: IOException) {
             throw IOException(e)
         } finally {
-            inputStream = null
+            randomAccessFile = null
             if (opened) {
                 opened = false
                 transferEnded()

@@ -32,13 +32,19 @@ class CardPresenter(private val onLongClickListener: ((MediaItem) -> Unit)? = nu
             mediaItem.mediaId.startsWith("action:Screensaver") -> R.drawable.ic_settings
             mediaItem.mediaId.startsWith("action:Resume") -> android.R.drawable.ic_media_play
             mediaItem.mediaId.startsWith("action:Recent") -> android.R.drawable.ic_menu_recent_history
-            mediaItem.mediaId.startsWith("action:Music Folders") -> R.drawable.ic_folder
+            mediaItem.mediaId.startsWith("action:Music Folders") || 
+            mediaItem.mediaId.startsWith("action:Internal Storage") -> R.drawable.ic_folder
             mediaItem.mediaId.startsWith("smb://") -> R.drawable.ic_network
             mediaItem.mediaId.startsWith("content://") -> R.drawable.ic_folder
             mediaItem.mediaId.lowercase().endsWith(".m3u") || 
-            mediaItem.mediaId.lowercase().endsWith(".m3u8") ||
-            mediaItem.mediaMetadata.artist?.toString()?.contains("Playlist") == true -> R.drawable.ic_playlist
+            mediaItem.mediaId.lowercase().endsWith(".m3u8") -> {
+                if (mediaItem.mediaId.startsWith("content://")) R.drawable.ic_playlist_local else R.drawable.ic_playlist
+            }
+            mediaItem.mediaMetadata.artist?.toString()?.contains("Playlist") == true -> {
+                if (mediaItem.mediaId.startsWith("content://")) R.drawable.ic_playlist_local else R.drawable.ic_playlist
+            }
             mediaItem.mediaId.startsWith("action:NOW:") -> android.R.drawable.ic_media_play
+            mediaItem.mediaId.startsWith("action:Exit") -> android.R.drawable.ic_lock_power_off
             else -> R.drawable.ic_audio
         }
         cardView.mainImage = androidx.appcompat.content.res.AppCompatResources.getDrawable(context, iconRes)

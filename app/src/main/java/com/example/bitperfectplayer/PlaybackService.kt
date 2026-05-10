@@ -92,6 +92,12 @@ class PlaybackService : MediaSessionService() {
         player.addListener(object : Player.Listener {
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                 android.util.Log.e("PlaybackService", "Player Error: ${error.errorCodeName} - ${error.message}", error)
+                // Skip to next if unplayable
+                if (player.hasNextMediaItem()) {
+                    player.seekToNext()
+                    player.prepare()
+                    player.play()
+                }
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -122,9 +128,19 @@ class PlaybackService : MediaSessionService() {
         
         val settings = getSharedPreferences("AppSettings", MODE_PRIVATE)
         if (settings.getBoolean("resume_playback", false)) {
-            settings.edit().putString("last_played_uri", uri)
+            val player = mediaSession?.player
+            val queue = mutableListOf<String>()
+            player?.let {
+                for (i in 0 until it.mediaItemCount) {
+                    queue.add(it.getMediaItemAt(i).mediaId)
+                }
+            }
+            settings.edit()
+                .putString("last_played_uri", uri)
                 .putString("last_played_title", title)
                 .putString("last_played_artist", artist)
+                .putInt("last_played_index", player?.currentMediaItemIndex ?: 0)
+                .putString("last_played_queue", JSONArray(queue).toString())
                 .apply()
         }
         
