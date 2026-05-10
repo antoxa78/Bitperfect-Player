@@ -38,4 +38,4 @@ Built using Kotlin, AndroidX Media3 (ExoPlayer), and Leanback.
 *   `eu.agno3.jcifs:jcifs-ng`
 
 ---
-*Developed for audiophiles who want the best sound quality on their TV.*
+*Developed for audiophiles who want the best sound quality on their Stereo System.*
