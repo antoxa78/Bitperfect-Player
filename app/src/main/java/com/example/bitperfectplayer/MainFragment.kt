@@ -128,6 +128,7 @@ class MainFragment : BrowseSupportFragment() {
         settingsAdapter.add(createActionItem("Resume Playback", if (isResumeEnabled()) "Enabled" else "Disabled"))
         settingsAdapter.add(createActionItem("Recent Files", "Settings and cleanup"))
         settingsAdapter.add(createActionItem("Scan Library", "Options: ${if (isAutoScanEnabled()) "Auto" else "Manual"}"))
+        settingsAdapter.add(createActionItem("About", "Version and build info"))
         val settingsHeader = HeaderItem(4, "Settings")
         rowsAdapter.add(ListRow(settingsHeader, settingsAdapter))
 
@@ -1642,6 +1643,22 @@ class MainFragment : BrowseSupportFragment() {
         Toast.makeText(requireContext(), "Library scan complete", Toast.LENGTH_SHORT).show()
     }
 
+    private fun showAboutDialog() {
+        val versionName = try {
+            requireContext().packageManager.getPackageInfo(requireContext().packageName, 0).versionName
+        } catch (e: Exception) { "Unknown" }
+        
+        // Simple fixed date for now or use current date
+        val buildDate = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
+            .format(java.util.Date())
+
+        AlertDialog.Builder(requireContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("About Bitperfect Player")
+            .setMessage("Release: $versionName\nBuild Date: $buildDate\nGitHub: https://github.com/antoxa78/Bitperfect-Player\n\nA high-fidelity music player for Android TV.")
+            .setPositiveButton("OK", null)
+            .show()
+    }
+
     private fun handleAction(actionId: String) {
         val activity = activity as? MainActivity
         when {
@@ -1668,6 +1685,9 @@ class MainFragment : BrowseSupportFragment() {
             }
             actionId == "action:Resume Last Played" -> {
                 resumeLastPlayed()
+            }
+            actionId == "action:About" -> {
+                showAboutDialog()
             }
             actionId == "action:Exit" -> {
                 activity?.stopService(android.content.Intent(requireContext(), PlaybackService::class.java))

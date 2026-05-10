@@ -30,8 +30,10 @@ class CardPresenter(private val onLongClickListener: ((MediaItem) -> Unit)? = nu
             mediaItem.mediaId.startsWith("action:Add Local") -> R.drawable.ic_add
             mediaItem.mediaId.startsWith("action:Add SMB") -> R.drawable.ic_network
             mediaItem.mediaId.startsWith("action:Screensaver") -> R.drawable.ic_settings
-            mediaItem.mediaId.startsWith("action:Resume") -> android.R.drawable.ic_media_play
+            mediaItem.mediaId.startsWith("action:Resume") -> R.drawable.ic_resume
             mediaItem.mediaId.startsWith("action:Recent") -> android.R.drawable.ic_menu_recent_history
+            mediaItem.mediaId.startsWith("action:Scan Library") -> R.drawable.ic_sync
+            mediaItem.mediaId.startsWith("action:About") -> R.drawable.ic_info
             mediaItem.mediaId.startsWith("action:Music Folders") || 
             mediaItem.mediaId.startsWith("action:Internal Storage") -> R.drawable.ic_folder
             mediaItem.mediaId.startsWith("smb://") -> R.drawable.ic_network

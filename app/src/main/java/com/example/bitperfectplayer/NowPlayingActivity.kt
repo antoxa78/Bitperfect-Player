@@ -188,71 +188,7 @@ class NowPlayingActivity : FragmentActivity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (resultCode == RESULT_OK) {
-            if (requestCode == 2001 || requestCode == 2002) {
-                val uris = mutableListOf<android.net.Uri>()
-                data?.let {
-                    if (it.clipData != null) {
-                        for (i in 0 until it.clipData!!.itemCount) {
-                            uris.add(it.clipData!!.getItemAt(i).uri)
-                        }
-                    } else if (it.data != null) {
-                        uris.add(it.data!!)
-                    }
-                }
-                if (uris.isNotEmpty()) {
-                    val loadingToast = android.widget.Toast.makeText(this, "Loading items...", android.widget.Toast.LENGTH_LONG)
-                    loadingToast.show()
-                    
-                    Thread {
-                        val allItems = mutableListOf<androidx.media3.common.MediaItem>()
-                        for (uri in uris) {
-                            try {
-                                contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                            } catch (e: Exception) {}
-                            
-                            val fileName = uri.lastPathSegment?.lowercase() ?: ""
-                            if (fileName.endsWith(".m3u") || fileName.endsWith(".m3u8")) {
-                                try {
-                                    contentResolver.openInputStream(uri)?.use { stream ->
-                                        allItems.addAll(parseM3uLocal(stream, uri))
-                                    }
-                                } catch (e: Exception) { e.printStackTrace() }
-                            } else {
-                                val title = uri.lastPathSegment?.substringBeforeLast(".") ?: "Track"
-                                allItems.add(androidx.media3.common.MediaItem.Builder()
-                                    .setMediaId(uri.toString())
-                                    .setUri(uri)
-                                    .setMediaMetadata(androidx.media3.common.MediaMetadata.Builder().setTitle(title).build())
-                                    .build())
-                            }
-                        }
-
-                        runOnUiThread {
-                            loadingToast.cancel()
-                            if (allItems.isNotEmpty()) {
-                                if (requestCode == 2002) {
-                                    mediaController?.setMediaItems(allItems)
-                                } else {
-                                    mediaController?.addMediaItems(allItems)
-                                }
-                                
-                                mediaController?.prepare()
-                                mediaController?.play()
-                                
-                                android.widget.Toast.makeText(this, "Loaded ${allItems.size} items", android.widget.Toast.LENGTH_SHORT).show()
-                                updateUI()
-                            }
-                        }
-                    }.start()
-                }
-            } else if (requestCode == 2003) {
-                data?.data?.let { uri ->
-                    contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    addDirectoryToPlaylist(uri)
-                }
-            }
-        }
+        // Internal explorer uses direct calls, but we keep this for any other intent results if needed.
     }
 
     private fun parseM3uLocal(inputStream: java.io.InputStream, baseUri: android.net.Uri): List<androidx.media3.common.MediaItem> {
@@ -548,21 +484,18 @@ class NowPlayingActivity : FragmentActivity() {
             layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f)
         }
 
-        buttonRow.addView(createBtn("Back") { dialog.dismiss() })
         buttonRow.addView(createBtn("Clear") { 
             controller.clearMediaItems()
             android.widget.Toast.makeText(this@NowPlayingActivity, "Playlist cleared", android.widget.Toast.LENGTH_SHORT).show()
             updateUI()
         })
         buttonRow.addView(createBtn("Add Files") {
-            val intent = android.content.Intent(android.content.Intent.ACTION_GET_CONTENT)
-            intent.type = "audio/*"
-            intent.putExtra(android.content.Intent.EXTRA_ALLOW_MULTIPLE, true)
-            startActivityForResult(intent, 2001)
+            checkAndBrowseInternalStorage(isSelectionMode = false, isDirectoryMode = false)
+            dialog.dismiss()
         })
         buttonRow.addView(createBtn("Add Directory") {
-            val intent = android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT_TREE)
-            startActivityForResult(intent, 2003)
+            checkAndBrowseInternalStorage(isSelectionMode = true, isDirectoryMode = true)
+            dialog.dismiss()
         })
 
         dialogView.addView(buttonRow)
@@ -576,67 +509,218 @@ class NowPlayingActivity : FragmentActivity() {
         dialog.show()
     }
 
-    private fun addDirectoryToPlaylist(uri: android.net.Uri) {
-        val loadingToast = android.widget.Toast.makeText(this, "Scanning directory...", android.widget.Toast.LENGTH_LONG)
+    private fun checkAndBrowseInternalStorage(isSelectionMode: Boolean, isDirectoryMode: Boolean) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            if (android.os.Environment.isExternalStorageManager()) {
+                browseFileStorage(android.os.Environment.getExternalStorageDirectory().absolutePath, isSelectionMode, isDirectoryMode)
+            } else {
+                android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                    .setTitle("All Files Access Required")
+                    .setMessage("To browse storage directly on Android TV 11+, please grant 'All Files Access' in the system settings.")
+                    .setPositiveButton("Settings") { _, _ ->
+                        try {
+                            val intent = android.content.Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                            intent.data = android.net.Uri.parse("package:$packageName")
+                            startActivity(intent)
+                        } catch (e: Exception) {
+                            val intent = android.content.Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                            startActivity(intent)
+                        }
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+        } else {
+            browseFileStorage(android.os.Environment.getExternalStorageDirectory().absolutePath, isSelectionMode, isDirectoryMode)
+        }
+    }
+
+    private data class BrowseItem(val name: String, val path: String, val icon: Int, val isDirectory: Boolean)
+
+    private class BrowseAdapter(context: android.content.Context, items: List<BrowseItem>) : 
+        android.widget.ArrayAdapter<BrowseItem>(context, R.layout.list_item_browse, items) {
+        override fun getView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View {
+            val view = convertView ?: android.view.LayoutInflater.from(context).inflate(R.layout.list_item_browse, parent, false)
+            val item = getItem(position)!!
+            view.findViewById<android.widget.TextView>(R.id.item_text).text = item.name
+            view.findViewById<android.widget.ImageView>(R.id.item_icon).setImageResource(item.icon)
+            return view
+        }
+    }
+
+    private fun browseFileStorage(path: String, isSelectionMode: Boolean, isDirectoryMode: Boolean) {
+        val currentDir = java.io.File(path)
+        val loadingToast = android.widget.Toast.makeText(this, "Reading folder...", android.widget.Toast.LENGTH_SHORT)
         loadingToast.show()
+
+        Thread {
+            try {
+                val files = currentDir.listFiles() ?: emptyArray()
+                val items = mutableListOf<BrowseItem>()
+
+                for (file in files) {
+                    if (file.name.startsWith(".")) continue
+                    
+                    if (file.isDirectory) {
+                        items.add(BrowseItem(file.name, file.absolutePath, R.drawable.ic_folder, true))
+                    } else if (!isDirectoryMode && isPlayable(file.name)) {
+                        val icon = if (file.name.lowercase().endsWith(".m3u") || file.name.lowercase().endsWith(".m3u8")) R.drawable.ic_playlist else R.drawable.ic_audio
+                        items.add(BrowseItem(file.name, file.absolutePath, icon, false))
+                    }
+                }
+
+                val sortedItems = items.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
+
+                runOnUiThread {
+                    loadingToast.cancel()
+                    
+                    val title = if (isDirectoryMode) "Select Directory" else currentDir.name.ifEmpty { "Storage" }
+                    
+                    val adapter = BrowseAdapter(this, sortedItems)
+                    val builder = android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle(title)
+
+                    val dialogView = android.widget.LinearLayout(this).apply {
+                        orientation = android.widget.LinearLayout.VERTICAL
+                        setPadding(16, 16, 16, 16)
+                    }
+
+                    val listView = android.widget.ListView(this).apply {
+                        this.adapter = adapter
+                        layoutParams = android.widget.LinearLayout.LayoutParams(
+                            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                            0, 1.0f
+                        )
+                    }
+                    dialogView.addView(listView)
+
+                    val buttonRow = android.widget.LinearLayout(this).apply {
+                        orientation = android.widget.LinearLayout.HORIZONTAL
+                        gravity = android.view.Gravity.CENTER
+                        layoutParams = android.widget.LinearLayout.LayoutParams(
+                            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                        )
+                    }
+
+                    val dialog = builder.setView(dialogView).create()
+
+                    fun createBtn(text: String, onClick: () -> Unit) = android.widget.Button(this).apply {
+                        this.text = text
+                        setOnClickListener {
+                            onClick()
+                            dialog.dismiss()
+                        }
+                        layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f)
+                        isFocusable = true
+                    }
+
+                    buttonRow.addView(createBtn("Back") { 
+                        dialog.dismiss()
+                        val parent = currentDir.parent
+                        if (parent != null && parent != android.os.Environment.getExternalStorageDirectory().parent) {
+                            browseFileStorage(parent, isSelectionMode, isDirectoryMode)
+                        }
+                    })
+                    if (isDirectoryMode) {
+                        buttonRow.addView(createBtn("Add Folder") {
+                            addFilesToPlaylist(currentDir, false)
+                        })
+                    } else {
+                        buttonRow.addView(createBtn("Add All") {
+                            addFilesToPlaylist(currentDir, false)
+                        })
+                        buttonRow.addView(createBtn("Replace All") {
+                            addFilesToPlaylist(currentDir, true)
+                        })
+                    }
+
+                    dialogView.addView(buttonRow)
+
+                    listView.setOnItemClickListener { _, _, which, _ ->
+                        val item = sortedItems[which]
+                        if (item.isDirectory) {
+                            dialog.dismiss()
+                            browseFileStorage(item.path, isSelectionMode, isDirectoryMode)
+                        } else {
+                            handleFileSelection(item.path, item.name)
+                            dialog.dismiss()
+                        }
+                    }
+
+                    dialog.show()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                runOnUiThread {
+                    loadingToast.cancel()
+                    android.widget.Toast.makeText(this, "Error: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun handleFileSelection(path: String, name: String) {
+        val file = java.io.File(path)
+        val options = arrayOf("Add to current playlist", "Replace current playlist")
         
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle(name)
+            .setItems(options) { _, which ->
+                addFilesToPlaylist(file, which == 1)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun addFilesToPlaylist(root: java.io.File, replace: Boolean) {
+        val controller = mediaController ?: return
+        val loadingToast = android.widget.Toast.makeText(this, "Processing files...", android.widget.Toast.LENGTH_SHORT)
+        loadingToast.show()
+
         Thread {
             val itemsToAdd = mutableListOf<androidx.media3.common.MediaItem>()
             
-            fun scanRecursive(dirUri: android.net.Uri) {
-                try {
-                    val treeId = android.provider.DocumentsContract.getTreeDocumentId(dirUri)
-                    val childrenUri = android.provider.DocumentsContract.buildChildDocumentsUriUsingTree(dirUri, treeId)
-                    val projection = arrayOf(
-                        android.provider.DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                        android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                        android.provider.DocumentsContract.Document.COLUMN_MIME_TYPE
-                    )
-                    contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
-                        val idCol = cursor.getColumnIndexOrThrow(android.provider.DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-                        val nameCol = cursor.getColumnIndexOrThrow(android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-                        val mimeCol = cursor.getColumnIndexOrThrow(android.provider.DocumentsContract.Document.COLUMN_MIME_TYPE)
-                        
-                        while (cursor.moveToNext()) {
-                            val id = cursor.getString(idCol)
-                            val name = cursor.getString(nameCol)
-                            val mime = cursor.getString(mimeCol)
-                            val childUri = android.provider.DocumentsContract.buildDocumentUriUsingTree(dirUri, id)
-                            
-                            if (mime == android.provider.DocumentsContract.Document.MIME_TYPE_DIR) {
-                                scanRecursive(childUri)
-                            } else if (isPlayable(name)) {
-                                if (name.lowercase().endsWith(".m3u") || name.lowercase().endsWith(".m3u8")) {
-                                    contentResolver.openInputStream(childUri)?.use { stream ->
-                                        itemsToAdd.addAll(parseM3uLocal(stream, childUri))
-                                    }
-                                } else {
-                                    val title = name.substringBeforeLast(".")
-                                    itemsToAdd.add(androidx.media3.common.MediaItem.Builder()
-                                        .setMediaId(childUri.toString())
-                                        .setUri(childUri)
-                                        .setMediaMetadata(androidx.media3.common.MediaMetadata.Builder().setTitle(title).build())
-                                        .build())
-                                }
+            fun scanRecursive(file: java.io.File) {
+                if (file.isDirectory) {
+                    file.listFiles()?.forEach { scanRecursive(it) }
+                } else if (isPlayable(file.name)) {
+                    if (file.name.lowercase().endsWith(".m3u") || file.name.lowercase().endsWith(".m3u8")) {
+                        try {
+                            java.io.FileInputStream(file).use { stream ->
+                                itemsToAdd.addAll(parseM3uLocal(stream, android.net.Uri.fromFile(file)))
                             }
-                        }
+                        } catch (e: Exception) {}
+                    } else {
+                        val uri = android.net.Uri.fromFile(file).toString()
+                        val title = file.name.substringBeforeLast(".")
+                        itemsToAdd.add(androidx.media3.common.MediaItem.Builder()
+                            .setMediaId(uri)
+                            .setUri(android.net.Uri.fromFile(file))
+                            .setMediaMetadata(androidx.media3.common.MediaMetadata.Builder().setTitle(title).build())
+                            .build())
                     }
-                } catch (e: Exception) { e.printStackTrace() }
+                }
             }
 
-            scanRecursive(uri)
+            scanRecursive(root)
 
             runOnUiThread {
                 loadingToast.cancel()
                 if (itemsToAdd.isNotEmpty()) {
                     val sortedItems = itemsToAdd.sortedBy { it.mediaMetadata.title?.toString()?.lowercase() }
-                    mediaController?.addMediaItems(sortedItems)
-                    mediaController?.prepare()
-                    mediaController?.play()
+                    
+                    if (replace) {
+                        controller.setMediaItems(sortedItems)
+                    } else {
+                        controller.addMediaItems(sortedItems)
+                    }
+                    controller.prepare()
+                    controller.play()
                     android.widget.Toast.makeText(this, "Added ${sortedItems.size} items", android.widget.Toast.LENGTH_SHORT).show()
                     updateUI()
                 } else {
-                    android.widget.Toast.makeText(this, "No music found in directory", android.widget.Toast.LENGTH_SHORT).show()
+                    android.widget.Toast.makeText(this, "No music found.", android.widget.Toast.LENGTH_SHORT).show()
                 }
             }
         }.start()
