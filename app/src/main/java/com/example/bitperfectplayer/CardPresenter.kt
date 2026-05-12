@@ -28,6 +28,7 @@ class CardPresenter(private val onLongClickListener: ((MediaItem) -> Unit)? = nu
         // Set icon based on media ID or extras
         val iconRes = when {
             mediaItem.mediaId.startsWith("action:Add Local") -> R.drawable.ic_add
+            mediaItem.mediaId.startsWith("action:External Drive") -> R.drawable.ic_usb
             mediaItem.mediaId.startsWith("action:Add SMB") -> R.drawable.ic_network
             mediaItem.mediaId.startsWith("action:Screensaver") -> R.drawable.ic_settings
             mediaItem.mediaId.startsWith("action:Resume") -> R.drawable.ic_resume
@@ -45,11 +46,15 @@ class CardPresenter(private val onLongClickListener: ((MediaItem) -> Unit)? = nu
             mediaItem.mediaMetadata.artist?.toString()?.contains("Playlist") == true -> {
                 if (mediaItem.mediaId.startsWith("content://")) R.drawable.ic_playlist_local else R.drawable.ic_playlist
             }
-            mediaItem.mediaId.startsWith("action:NOW:") -> android.R.drawable.ic_media_play
+            mediaItem.mediaId.startsWith("action:NOW:") -> R.drawable.anim_playing
             mediaItem.mediaId.startsWith("action:Exit") -> android.R.drawable.ic_lock_power_off
             else -> R.drawable.ic_audio
         }
-        cardView.mainImage = androidx.appcompat.content.res.AppCompatResources.getDrawable(context, iconRes)
+        val drawable = androidx.appcompat.content.res.AppCompatResources.getDrawable(context, iconRes)
+        cardView.mainImage = drawable
+        if (drawable is android.graphics.drawable.Animatable) {
+            drawable.start()
+        }
 
         cardView.setOnLongClickListener {
             onLongClickListener?.invoke(mediaItem)

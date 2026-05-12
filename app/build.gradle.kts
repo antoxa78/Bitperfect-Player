@@ -14,8 +14,8 @@ android {
         applicationId = "com.example.bitperfectplayer"
         minSdk = 28
         targetSdk = 36
-        versionCode = 18
-        versionName = "2.1.4"
+        versionCode = 20
+        versionName = "2.1.6"
 
         buildConfigField("long", "BUILD_TIME", "${System.currentTimeMillis()}L")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

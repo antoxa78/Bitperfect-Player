@@ -33,6 +33,13 @@ class MainFragment : BrowseSupportFragment() {
     private val KEY_AUTO_SCAN = "auto_scan"
     private var hasAttemptedResume = false
 
+    private val externalStorageReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(ctx: Context?, intent: android.content.Intent?) {
+            if (!isAdded) return
+            view?.post { refreshRows() }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Set some jCIFS properties for better compatibility
@@ -48,6 +55,24 @@ class MainFragment : BrowseSupportFragment() {
         loadRows()
         setupEventListeners()
         observePlaybackState()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        val filter = android.content.IntentFilter().apply {
+            addAction(android.content.Intent.ACTION_MEDIA_MOUNTED)
+            addAction(android.content.Intent.ACTION_MEDIA_UNMOUNTED)
+            addAction(android.content.Intent.ACTION_MEDIA_EJECT)
+            addAction(android.content.Intent.ACTION_MEDIA_REMOVED)
+            addAction(android.content.Intent.ACTION_MEDIA_BAD_REMOVAL)
+            addDataScheme("file")
+        }
+        try { requireContext().registerReceiver(externalStorageReceiver, filter) } catch (e: Exception) { e.printStackTrace() }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        try { requireContext().unregisterReceiver(externalStorageReceiver) } catch (e: Exception) {}
     }
 
     private fun setupUIElements() {
@@ -84,6 +109,7 @@ class MainFragment : BrowseSupportFragment() {
         val actionsAdapter = ArrayObjectAdapter(cardPresenter)
         actionsAdapter.add(createActionItem("Internal Storage", "Browse all internal files"))
         actionsAdapter.add(createActionItem("Music Folders", "Manage local and network folders"))
+        actionsAdapter.add(createActionItem("External Drive", "Browse USB and SSD drives"))
         actionsAdapter.add(createActionItem("Add SMB Source", "Enter network share details"))
         val actionsHeader = HeaderItem(1, "Actions")
         rowsAdapter.add(ListRow(actionsHeader, actionsAdapter))
@@ -99,12 +125,6 @@ class MainFragment : BrowseSupportFragment() {
         loadSavedSmbShares(networkAdapter)
         val networkHeader = HeaderItem(3, "Network Shares (SMB)")
         rowsAdapter.add(ListRow(networkHeader, networkAdapter))
-
-        // Section: Browser
-        val browserAdapter = ArrayObjectAdapter(cardPresenter)
-        browserAdapter.add(createActionItem("Internal Storage", "Browse all local files"))
-        val browserHeader = HeaderItem(8, "File Browser")
-        rowsAdapter.add(ListRow(browserHeader, browserAdapter))
 
         // Section: Local Music Library (Configured Folders)
         val localAdapter = ArrayObjectAdapter(cardPresenter)
@@ -194,32 +214,60 @@ class MainFragment : BrowseSupportFragment() {
         val editUser = view.findViewById<EditText>(R.id.edit_username)
         val editPass = view.findViewById<EditText>(R.id.edit_password)
 
-        AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+        val dialog = AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("Add SMB Share")
             .setView(view)
-            .setPositiveButton("Add Manually") { _, _ ->
-                val ip = editIp.text.toString().trim()
-                val share = editShare.text.toString().trim().removePrefix("/").removeSuffix("/")
-                val user = editUser.text.toString().trim()
-                val pass = editPass.text.toString().trim()
-                if (ip.isNotEmpty() && share.isNotEmpty()) {
-                    saveSmbShare(ip, share, user, pass)
-                } else {
-                    Toast.makeText(activity, "IP and Share Name are required", Toast.LENGTH_SHORT).show()
-                }
+            .create()
+
+        // Create a horizontal layout for buttons
+        val buttonRow = android.widget.LinearLayout(activity).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER
+            setPadding(16, 16, 16, 16)
+        }
+
+        fun createBtn(text: String, onClick: () -> Unit) = android.widget.Button(activity).apply {
+            this.text = text
+            setOnClickListener {
+                onClick()
+                dialog.dismiss()
             }
-            .setNeutralButton("Scan Shares") { _, _ ->
-                val ip = editIp.text.toString().trim()
-                val user = editUser.text.toString().trim()
-                val pass = editPass.text.toString().trim()
-                if (ip.isNotEmpty()) {
-                    scanSharesOnIp(ip, user, pass)
-                } else {
-                    scanNetworkForSmb(user, pass)
-                }
+            layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f)
+            isFocusable = true
+        }
+
+        buttonRow.addView(createBtn("Scan Shares") {
+            val ip = editIp.text.toString().trim()
+            val user = editUser.text.toString().trim()
+            val pass = editPass.text.toString().trim()
+            if (ip.isNotEmpty()) {
+                scanSharesOnIp(ip, user, pass)
+            } else {
+                scanNetworkForSmb(user, pass)
             }
-            .setNegativeButton("Cancel", null)
-            .show()
+        })
+        buttonRow.addView(createBtn("Add Manually") {
+            val ip = editIp.text.toString().trim()
+            val share = editShare.text.toString().trim().removePrefix("/").removeSuffix("/")
+            val user = editUser.text.toString().trim()
+            val pass = editPass.text.toString().trim()
+            if (ip.isNotEmpty() && share.isNotEmpty()) {
+                saveSmbShare(ip, share, user, pass)
+            } else {
+                Toast.makeText(activity, "IP and Share Name are required", Toast.LENGTH_SHORT).show()
+            }
+        })
+
+        // Add a helper hint
+        val hintView = android.widget.TextView(activity).apply {
+            text = "Click 'Scan Shares' after entering IP to see all folders."
+            textSize = 12f
+            setPadding(16, 0, 16, 0)
+            gravity = android.view.Gravity.CENTER
+        }
+        (view as? android.view.ViewGroup)?.addView(hintView)
+        (view as? android.view.ViewGroup)?.addView(buttonRow)
+        dialog.show()
     }
 
     private fun scanSharesOnIp(ip: String, user: String, pass: String) {
@@ -279,11 +327,11 @@ class MainFragment : BrowseSupportFragment() {
                     loadingToast.cancel()
                     AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                         .setTitle("Scan Failed")
-                        .setMessage("Could not connect to $ip.\nDetails: ${e.localizedMessage ?: "Unknown error"}")
-                        .setPositiveButton("Retry with Credentials") { _, _ ->
-                            showAddSmbDialog() // Show dialog again to enter user/pass
+                        .setMessage("Could not connect to $ip.\nDetails: ${e.localizedMessage ?: "Unknown error"}\n\nNote: Many modern PCs require a Username and Password to list shares.")
+                        .setPositiveButton("Enter Credentials") { _, _ ->
+                            showCredentialsDialog(ip) 
                         }
-                        .setNegativeButton("OK", null)
+                        .setNegativeButton("Back", { _, _ -> showAddSmbDialog() })
                         .show()
                 }
             }
@@ -477,16 +525,31 @@ class MainFragment : BrowseSupportFragment() {
     }
 
     private fun createMediaItem(title: String, artist: String, uri: String): MediaItem {
+        val metadataBuilder = MediaMetadata.Builder()
+            .setTitle(title)
+        
+        if (artist.isNotEmpty()) {
+            metadataBuilder.setArtist(artist)
+        }
+
         return MediaItem.Builder()
             .setMediaId(uri)
             .setUri(Uri.parse(uri))
-            .setMediaMetadata(
-                MediaMetadata.Builder()
-                    .setTitle(title)
-                    .setArtist(artist)
-                    .build()
-            )
+            .setMimeType(getMimeType(uri))
+            .setMediaMetadata(metadataBuilder.build())
             .build()
+    }
+
+    private fun getMimeType(uri: String): String? {
+        val lower = uri.lowercase()
+        return when {
+            lower.endsWith(".flac") -> androidx.media3.common.MimeTypes.AUDIO_FLAC
+            lower.endsWith(".mp3") -> androidx.media3.common.MimeTypes.AUDIO_MPEG
+            lower.endsWith(".wav") -> androidx.media3.common.MimeTypes.AUDIO_WAV
+            lower.endsWith(".m4a") || lower.endsWith(".aac") -> androidx.media3.common.MimeTypes.AUDIO_AAC
+            lower.endsWith(".ogg") -> androidx.media3.common.MimeTypes.AUDIO_OGG
+            else -> null
+        }
     }
 
     private fun setupEventListeners() {
@@ -496,12 +559,16 @@ class MainFragment : BrowseSupportFragment() {
                     handleAction(item.mediaId)
                 } else if (row is ListRow && row.headerItem.id == 6L) { // Playlists
                     if (item.mediaId.startsWith("smb://")) {
-                        handleSmbSelection(item.mediaId)
+                        val file = SmbFile(item.mediaId)
+                        addSmbToPlaylist(file, replace = true)
                     } else if (item.mediaId.startsWith("content://")) {
-                        handleLocalSelection(item.mediaId, item.mediaMetadata.title.toString())
+                        addLocalToPlaylist(item.mediaId, item.mediaMetadata.title.toString(), replace = true)
+                    } else if (item.mediaId.startsWith("file://")) {
+                        val file = java.io.File(Uri.parse(item.mediaId).path ?: "")
+                        addFilesToPlaylist(file, replace = true)
                     }
                 } else if (item.mediaId.startsWith("smb://")) {
-                    if (item.mediaId.endsWith("/")) {
+              if (item.mediaId.endsWith("/")) {
                         browseSmbDirectory(item.mediaId)
                     } else {
                         // It's an SMB file, play it or show options
@@ -801,14 +868,14 @@ class MainFragment : BrowseSupportFragment() {
                     } catch (e: Exception) {
                         // Fallback if buildChildDocumentsUriUsingTree fails (might not be a tree URI)
                         if (isPlayable(displayName)) {
-                            itemsToAdd.add(createMediaItem(displayName, "Local Library", uri.toString()))
+                            itemsToAdd.add(createMediaItem(displayName, "", uri.toString()))
                         }
                     }
                 } else if (isPlayable(displayName)) {
                     if (displayName.lowercase().endsWith(".m3u") || displayName.lowercase().endsWith(".m3u8")) {
                         itemsToAdd.addAll(mainActivity.parseM3u(uri))
                     } else {
-                        itemsToAdd.add(createMediaItem(displayName, "Local Library", uri.toString()))
+                        itemsToAdd.add(createMediaItem(displayName, "", uri.toString()))
                     }
                 }
             }
@@ -823,7 +890,7 @@ class MainFragment : BrowseSupportFragment() {
             } else if (isInitialDir) {
                 scanRecursive(rootUri, true, name)
             } else {
-                itemsToAdd.add(createMediaItem(name, "Local Library", uriString))
+                itemsToAdd.add(createMediaItem(name, "", uriString))
             }
 
             activity?.runOnUiThread {
@@ -902,7 +969,7 @@ class MainFragment : BrowseSupportFragment() {
                         if (f.name.lowercase().endsWith(".m3u") || f.name.lowercase().endsWith(".m3u8")) {
                             f.getInputStream().use { itemsToAdd.addAll(mainActivity?.parseM3uFromStream(it) ?: emptyList()) }
                         } else {
-                            itemsToAdd.add(createMediaItem(f.name, "SMB Share", f.path))
+                            itemsToAdd.add(createMediaItem(f.name, "", f.path))
                         }
                     }
                 }
@@ -969,6 +1036,130 @@ class MainFragment : BrowseSupportFragment() {
         } else {
             browseFileStorage(android.os.Environment.getExternalStorageDirectory().absolutePath, isSelectionMode)
         }
+    }
+
+    private data class ExternalDrive(val name: String, val path: String)
+
+    private fun detectExternalDrives(): List<ExternalDrive> {
+        val context = context ?: return emptyList()
+        val drives = linkedMapOf<String, ExternalDrive>()
+        val primaryRoot = android.os.Environment.getExternalStorageDirectory().absolutePath.trimEnd('/')
+
+        fun tryAdd(rawPath: String?, label: String?) {
+            if (rawPath.isNullOrBlank()) return
+            val path = rawPath.trimEnd('/')
+            if (path.isEmpty() || path == primaryRoot || drives.containsKey(path)) return
+            val file = java.io.File(path)
+            if (!file.exists() || !file.isDirectory) return
+            // canRead() is unreliable on /mnt/media_rw and some Android TV mounts; listing is the real test
+            val readable = try { file.list() != null } catch (e: Exception) { false }
+            if (!readable) return
+            val name = label?.takeIf { it.isNotBlank() } ?: file.name.ifEmpty { "External Drive" }
+            drives[path] = ExternalDrive(name, path)
+        }
+
+        // 1) StorageManager.getStorageVolumes() — gives the best human-readable label
+        try {
+            val sm = context.getSystemService(Context.STORAGE_SERVICE) as? android.os.storage.StorageManager
+            sm?.storageVolumes?.forEach { volume ->
+                if (volume.isPrimary) return@forEach
+                val path: String? = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                    volume.directory?.absolutePath
+                } else {
+                    try { volume.javaClass.getMethod("getPath").invoke(volume) as? String } catch (e: Exception) { null }
+                }
+                tryAdd(path, volume.getDescription(context))
+            }
+        } catch (e: Exception) { e.printStackTrace() }
+
+        // 2) getExternalFilesDirs() — sandbox paths reveal volume roots
+        try {
+            context.getExternalFilesDirs(null)?.forEach { sandbox ->
+                if (sandbox == null) return@forEach
+                val idx = sandbox.absolutePath.indexOf("/Android/")
+                if (idx > 0) tryAdd(sandbox.absolutePath.substring(0, idx), null)
+            }
+        } catch (e: Exception) { e.printStackTrace() }
+
+        // 3) Scan /storage directly — Android TV USB drives often land here with no StorageVolume entry
+        try {
+            java.io.File("/storage").listFiles()?.forEach { f ->
+                val n = f.name
+                if (n == "emulated" || n == "self" || n == "enc_emulated" || n.startsWith("private")) return@forEach
+                tryAdd(f.absolutePath, null)
+            }
+        } catch (e: Exception) { e.printStackTrace() }
+
+        // 4) /proc/mounts as a final sweep — catches unusual mount points like /mnt/usb/<...>
+        try {
+            val removableFs = setOf("vfat", "exfat", "ntfs", "ntfs3", "ext4", "ext3", "ext2", "f2fs", "sdfat", "fuse", "fuseblk")
+            val skipPrefixes = listOf("/mnt/runtime", "/mnt/installer", "/mnt/androidwritable", "/mnt/user",
+                "/mnt/pass_through", "/mnt/appfuse", "/mnt/asec", "/mnt/obb", "/mnt/expand", "/mnt/secure")
+            java.io.BufferedReader(java.io.FileReader("/proc/mounts")).use { reader ->
+                reader.lineSequence().forEach { line ->
+                    val parts = line.split(" ")
+                    if (parts.size < 3) return@forEach
+                    val mount = parts[1]
+                    val fsType = parts[2]
+                    if (fsType !in removableFs) return@forEach
+                    if (!mount.startsWith("/storage/") && !mount.startsWith("/mnt/")) return@forEach
+                    if (skipPrefixes.any { mount.startsWith(it) }) return@forEach
+                    tryAdd(mount, null)
+                }
+            }
+        } catch (e: Exception) { e.printStackTrace() }
+
+        return drives.values.toList()
+    }
+
+    private fun showExternalDrivesDialog() {
+        val context = activity ?: return
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
+            !android.os.Environment.isExternalStorageManager()) {
+            AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("All Files Access Required")
+                .setMessage("To browse USB and external drives, please grant 'All Files Access' in the system settings.")
+                .setPositiveButton("Settings") { _, _ ->
+                    try {
+                        val intent = android.content.Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                        intent.data = android.net.Uri.parse("package:${context.packageName}")
+                        startActivity(intent)
+                    } catch (e: Exception) {
+                        val intent = android.content.Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                        startActivity(intent)
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+            return
+        }
+
+        val drives = detectExternalDrives()
+        if (drives.isEmpty()) {
+            val storageContents = try {
+                java.io.File("/storage").listFiles()?.joinToString(", ") { it.name } ?: "<unreadable>"
+            } catch (e: Exception) { "<error: ${e.message}>" }
+            AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("No External Drives")
+                .setMessage("No USB or SSD drives were detected. Connect a drive and try again.\n\nVisible in /storage: $storageContents")
+                .setPositiveButton("Retry") { _, _ -> showExternalDrivesDialog() }
+                .setNegativeButton("Cancel", null)
+                .show()
+            return
+        }
+
+        if (drives.size == 1) {
+            browseFileStorage(drives[0].path)
+            return
+        }
+
+        val items = drives.map { BrowseItem(it.name, it.path, R.drawable.ic_usb, true) }
+        val adapter = BrowseAdapter(context, items)
+        AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Select External Drive")
+            .setAdapter(adapter) { _, which -> browseFileStorage(drives[which].path) }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun browseFileStorage(path: String, isSelectionMode: Boolean = false) {
@@ -1429,26 +1620,46 @@ class MainFragment : BrowseSupportFragment() {
         editIp.setText(ip)
         editIp.isEnabled = false // Lock IP
 
-        AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+        val dialog = AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("Credentials for $ip")
             .setView(view)
-            .setPositiveButton("Scan Shares") { _, _ ->
-                val user = editUser.text.toString().trim()
-                val pass = editPass.text.toString().trim()
-                scanSharesOnIp(ip, user, pass)
+            .create()
+
+        // Create a horizontal layout for buttons
+        val buttonRow = android.widget.LinearLayout(activity).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER
+            setPadding(16, 16, 16, 16)
+        }
+
+        fun createBtn(text: String, onClick: () -> Unit) = android.widget.Button(activity).apply {
+            this.text = text
+            setOnClickListener {
+                onClick()
+                dialog.dismiss()
             }
-            .setNeutralButton("Add Manually") { _, _ ->
-                val share = editShare.text.toString().trim().removePrefix("/").removeSuffix("/")
-                val user = editUser.text.toString().trim()
-                val pass = editPass.text.toString().trim()
-                if (share.isNotEmpty()) {
-                    saveSmbShare(ip, share, user, pass)
-                } else {
-                    Toast.makeText(activity, "Share Name is required", Toast.LENGTH_SHORT).show()
-                }
+            layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f)
+            isFocusable = true
+        }
+
+        buttonRow.addView(createBtn("Scan Shares") {
+            val user = editUser.text.toString().trim()
+            val pass = editPass.text.toString().trim()
+            scanSharesOnIp(ip, user, pass)
+        })
+        buttonRow.addView(createBtn("Add Manually") {
+            val share = editShare.text.toString().trim().removePrefix("/").removeSuffix("/")
+            val user = editUser.text.toString().trim()
+            val pass = editPass.text.toString().trim()
+            if (share.isNotEmpty()) {
+                saveSmbShare(ip, share, user, pass)
+            } else {
+                Toast.makeText(activity, "Share Name is required", Toast.LENGTH_SHORT).show()
             }
-            .setNegativeButton("Back", { _, _ -> scanNetworkForSmb("", "") })
-            .show()
+        })
+
+        (view as? android.view.ViewGroup)?.addView(buttonRow)
+        dialog.show()
     }
 
     private fun viewConfiguredFolders() {
@@ -1542,14 +1753,13 @@ class MainFragment : BrowseSupportFragment() {
             val items = mutableListOf<MediaItem>()
             for (i in 0 until queueArray.length()) {
                 val uri = queueArray.getString(i)
-                val title = if (uri.startsWith("smb://")) {
-                    val decoded = Uri.decode(uri.substringAfterLast("/").takeIf { it.isNotEmpty() } ?: uri)
-                    decoded.substringBeforeLast(".") // Remove extension for cleaner title
+                val segment = if (uri.startsWith("smb://")) {
+                    Uri.decode(uri.substringAfterLast("/").takeIf { it.isNotEmpty() } ?: uri)
                 } else {
-                    val segment = Uri.parse(uri).lastPathSegment ?: uri
-                    segment.substringBeforeLast(".")
+                    Uri.parse(uri).lastPathSegment ?: uri
                 }
-                items.add(createMediaItem(title, "", uri)) // Leave artist empty to let tag reader fill it
+                val title = segment.substringBeforeLast(".")
+                items.add(createMediaItem(title, "", uri))
             }
             
             if (items.isEmpty()) return
@@ -1648,13 +1858,15 @@ class MainFragment : BrowseSupportFragment() {
             requireContext().packageManager.getPackageInfo(requireContext().packageName, 0).versionName
         } catch (e: Exception) { "Unknown" }
         
-        // Simple fixed date for now or use current date
         val buildDate = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
             .format(java.util.Date())
+        
+        val buildTime = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+            .format(java.util.Date(BuildConfig.BUILD_TIME))
 
         AlertDialog.Builder(requireContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("About Bitperfect Player")
-            .setMessage("Release: $versionName\nBuild Date: $buildDate\nGitHub: https://github.com/antoxa78/Bitperfect-Player\n\nA high-fidelity music player for Android TV.")
+            .setMessage("Release: $versionName\nBuild Date: $buildDate\nBuild Time: $buildTime\nGitHub: https://github.com/antoxa78/Bitperfect-Player\n\nA high-fidelity music player for Android TV.")
             .setPositiveButton("OK", null)
             .show()
     }
@@ -1664,6 +1876,9 @@ class MainFragment : BrowseSupportFragment() {
         when {
             actionId == "action:Internal Storage" -> {
                 checkAndBrowseInternalStorage()
+            }
+            actionId == "action:External Drive" -> {
+                showExternalDrivesDialog()
             }
             actionId == "action:Add SMB Source" -> {
                 showAddSmbDialog()

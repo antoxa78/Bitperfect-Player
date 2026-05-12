@@ -219,15 +219,20 @@ class NowPlayingActivity : FragmentActivity() {
                     } catch (e: Exception) { null }
 
                     if (itemUri != null) {
+                        val metadataBuilder = androidx.media3.common.MediaMetadata.Builder()
+                        var finalTitle = currentTitle ?: itemUri.lastPathSegment ?: trimmed
+                        
+                        if (finalTitle.contains(" - ")) {
+                            val parts = finalTitle.split(" - ", limit = 2)
+                            metadataBuilder.setArtist(parts[0].trim())
+                            finalTitle = parts[1].trim()
+                        }
+
                         items.add(
                             androidx.media3.common.MediaItem.Builder()
                                 .setMediaId(trimmed)
                                 .setUri(itemUri)
-                                .setMediaMetadata(
-                                    androidx.media3.common.MediaMetadata.Builder()
-                                        .setTitle(currentTitle ?: itemUri.lastPathSegment ?: trimmed)
-                                        .build()
-                                )
+                                .setMediaMetadata(metadataBuilder.setTitle(finalTitle).build())
                                 .build()
                         )
                     }
@@ -243,15 +248,31 @@ class NowPlayingActivity : FragmentActivity() {
     private fun updateScreensaverText(textView: TextView) {
         val mediaItem = mediaController?.currentMediaItem
         val metadata = mediaItem?.mediaMetadata
-        val title = metadata?.title ?: "Music"
-        val artist = metadata?.artist ?: "Unknown Artist"
-        val album = metadata?.albumTitle ?: "Unknown Album"
         
-        // Track number if available in metadata
+        var title = metadata?.displayTitle?.toString() ?: metadata?.title?.toString() ?: "Music"
+        var artist = metadata?.artist?.toString() ?: metadata?.albumArtist?.toString() ?: ""
+        val album = metadata?.albumTitle?.toString() ?: metadata?.station?.toString() ?: ""
+
+        if ((artist.isEmpty() || artist.equals("Unknown Artist", ignoreCase = true)) && title.contains(" - ")) {
+            val parts = title.split(" - ", limit = 2)
+            artist = parts[0].trim()
+            title = parts[1].trim()
+        }
+
         val trackNum = metadata?.trackNumber
         val trackPrefix = if (trackNum != null) "$trackNum. " else ""
         
-        textView.text = "Now Playing:\n$trackPrefix$title\n$artist\n$album"
+        val builder = StringBuilder("Now Playing:\n")
+        builder.append(trackPrefix).append(title)
+        
+        if (artist.isNotEmpty() && !artist.equals("Unknown Artist", ignoreCase = true)) {
+            builder.append("\n").append(artist)
+        }
+        if (album.isNotEmpty() && !album.equals("Unknown Album", ignoreCase = true)) {
+            builder.append("\n").append(album)
+        }
+        
+        textView.text = builder.toString()
         textView.textAlignment = android.view.View.TEXT_ALIGNMENT_CENTER
     }
 
@@ -277,7 +298,7 @@ class NowPlayingActivity : FragmentActivity() {
             }
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 btnPlayPause.setImageResource(
-                    if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
+                    if (isPlaying) R.drawable.ic_pause else R.drawable.ic_play
                 )
                 if (isPlaying) resetScreensaverTimer() else screensaverHandler.removeCallbacks(screensaverRunnable)
             }
@@ -311,18 +332,26 @@ class NowPlayingActivity : FragmentActivity() {
         val mediaItem = controller.currentMediaItem
         val metadata = mediaItem?.mediaMetadata
         
-        textTitle.text = metadata?.title ?: "Unknown Title"
-        
-        val artist = metadata?.artist
-        val subtitle = metadata?.subtitle
+        var title = metadata?.displayTitle?.toString() ?: metadata?.title?.toString() ?: "Unknown Title"
+        var artist = metadata?.artist?.toString() ?: metadata?.albumArtist?.toString() ?: ""
+        val subtitle = metadata?.subtitle?.toString() ?: ""
+
+        // If artist is missing or "Unknown Artist", try to extract it from title
+        if ((artist.isEmpty() || artist.equals("Unknown Artist", ignoreCase = true)) && title.contains(" - ")) {
+            val parts = title.split(" - ", limit = 2)
+            artist = parts[0].trim()
+            title = parts[1].trim()
+        }
+
+        textTitle.text = title
         textArtist.text = when {
-            !artist.isNullOrEmpty() -> artist
-            !subtitle.isNullOrEmpty() -> subtitle
+            artist.isNotEmpty() && !artist.equals("Unknown Artist", ignoreCase = true) -> artist
+            subtitle.isNotEmpty() -> subtitle
             else -> "Unknown Artist"
         }
 
-        // Try to get album from albumTitle or potentially other fields
-        val album = metadata?.albumTitle
+        // Try to get album from albumTitle or station name for streams
+        val album = metadata?.albumTitle ?: metadata?.station
         if (!album.isNullOrEmpty()) {
             textAlbum.text = album.toString()
             textAlbum.visibility = android.view.View.VISIBLE
@@ -343,7 +372,7 @@ class NowPlayingActivity : FragmentActivity() {
         imgTrackIcon.setImageResource(iconRes)
 
         btnPlayPause.setImageResource(
-            if (controller.isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
+            if (controller.isPlaying) R.drawable.ic_pause else R.drawable.ic_play
         )
         
         updateShuffleRepeatUI()
@@ -693,10 +722,20 @@ class NowPlayingActivity : FragmentActivity() {
                         } catch (e: Exception) {}
                     } else {
                         val uri = android.net.Uri.fromFile(file).toString()
+                        val lower = uri.lowercase()
+                        val mimeType = when {
+                            lower.endsWith(".flac") -> androidx.media3.common.MimeTypes.AUDIO_FLAC
+                            lower.endsWith(".mp3") -> androidx.media3.common.MimeTypes.AUDIO_MPEG
+                            lower.endsWith(".wav") -> androidx.media3.common.MimeTypes.AUDIO_WAV
+                            lower.endsWith(".m4a") || lower.endsWith(".aac") -> androidx.media3.common.MimeTypes.AUDIO_AAC
+                            lower.endsWith(".ogg") -> androidx.media3.common.MimeTypes.AUDIO_OGG
+                            else -> null
+                        }
                         val title = file.name.substringBeforeLast(".")
                         itemsToAdd.add(androidx.media3.common.MediaItem.Builder()
                             .setMediaId(uri)
                             .setUri(android.net.Uri.fromFile(file))
+                            .setMimeType(mimeType)
                             .setMediaMetadata(androidx.media3.common.MediaMetadata.Builder().setTitle(title).build())
                             .build())
                     }

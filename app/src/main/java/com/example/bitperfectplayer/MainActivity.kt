@@ -88,9 +88,20 @@ class MainActivity : FragmentActivity() {
             contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
         } catch (e: Exception) {}
 
+        val lower = uri.toString().lowercase()
+        val mimeType = when {
+            lower.endsWith(".flac") -> androidx.media3.common.MimeTypes.AUDIO_FLAC
+            lower.endsWith(".mp3") -> androidx.media3.common.MimeTypes.AUDIO_MPEG
+            lower.endsWith(".wav") -> androidx.media3.common.MimeTypes.AUDIO_WAV
+            lower.endsWith(".m4a") || lower.endsWith(".aac") -> androidx.media3.common.MimeTypes.AUDIO_AAC
+            lower.endsWith(".ogg") -> androidx.media3.common.MimeTypes.AUDIO_OGG
+            else -> null
+        }
+
         return MediaItem.Builder()
             .setMediaId(uri.toString())
             .setUri(uri)
+            .setMimeType(mimeType)
             .setMediaMetadata(
                 MediaMetadata.Builder()
                     .setTitle(uri.lastPathSegment ?: "Unknown")
@@ -147,16 +158,21 @@ class MainActivity : FragmentActivity() {
                             else -> null
                         }
 
+                        val metadataBuilder = MediaMetadata.Builder()
+                        var finalTitle = currentTitle ?: itemUri.lastPathSegment ?: trimmed
+                        
+                        if (finalTitle.contains(" - ")) {
+                            val parts = finalTitle.split(" - ", limit = 2)
+                            metadataBuilder.setArtist(parts[0].trim())
+                            finalTitle = parts[1].trim()
+                        }
+                        
                         items.add(
                             MediaItem.Builder()
                                 .setMediaId(trimmed)
                                 .setUri(itemUri)
                                 .setMimeType(mimeType)
-                                .setMediaMetadata(
-                                    MediaMetadata.Builder()
-                                        .setTitle(currentTitle ?: itemUri.lastPathSegment ?: trimmed)
-                                        .build()
-                                )
+                                .setMediaMetadata(metadataBuilder.setTitle(finalTitle).build())
                                 .build()
                         )
                     }
