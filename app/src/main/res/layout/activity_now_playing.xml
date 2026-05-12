@@ -62,28 +62,6 @@
         android:textColor="#00E676"
         android:textSize="14sp" />
 
-    <LinearLayout
-        android:id="@+id/layout_output_indicator"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:gravity="center_vertical"
-        android:orientation="horizontal">
-        <ImageView
-            android:id="@+id/img_output_icon"
-            android:layout_width="16dp"
-            android:layout_height="16dp"
-            android:src="@drawable/ic_direct" />
-        <TextView
-            android:id="@+id/text_output_status"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="Direct Output"
-            android:textColor="#AAAAAA"
-            android:textSize="12sp" />
-    </LinearLayout>
-
     <SeekBar
         android:id="@+id/seek_bar"
         android:layout_width="600dp"

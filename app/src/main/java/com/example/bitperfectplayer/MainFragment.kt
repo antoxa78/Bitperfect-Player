@@ -246,7 +246,7 @@ class MainFragment : BrowseSupportFragment() {
                 scanNetworkForSmb(user, pass)
             }
         })
-        buttonRow.addView(createBtn("Add Manually") {
+        buttonRow.addView(createBtn("Add") {
             val ip = editIp.text.toString().trim()
             val share = editShare.text.toString().trim().removePrefix("/").removeSuffix("/")
             val user = editUser.text.toString().trim()
@@ -1647,7 +1647,7 @@ class MainFragment : BrowseSupportFragment() {
             val pass = editPass.text.toString().trim()
             scanSharesOnIp(ip, user, pass)
         })
-        buttonRow.addView(createBtn("Add Manually") {
+        buttonRow.addView(createBtn("Add") {
             val share = editShare.text.toString().trim().removePrefix("/").removeSuffix("/")
             val user = editUser.text.toString().trim()
             val pass = editPass.text.toString().trim()
