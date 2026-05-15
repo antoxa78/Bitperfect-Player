@@ -1,6 +1,6 @@
 # Bitperfect Player
 
-A high-fidelity music player designed specifically for Android TV, focusing on bit-perfect audio delivery and seamless integration with both local and network storage.
+A high-fidelity music player designed specifically for Nvidia Shield Android TV, focusing on bit-perfect audio delivery and seamless integration with both local and network storage.
 
 ## Features
 
